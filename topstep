@@ -198,7 +198,12 @@ case "$command" in
     if [ "${1:-}" = "stop" ]; then "${BT[@]}" down; else
       "${BT[@]}" up -d
       port="${WEBSERVER_PORT:-$(grep -E '^WEBSERVER_PORT=' .env | cut -d= -f2 || true)}"
-      echo "Backtest web app: http://<server>:${port:-8095}"
+      bind="${WEBSERVER_BIND:-$(grep -E '^WEBSERVER_BIND=' .env | cut -d= -f2 || true)}"
+      if [ "${bind:-0.0.0.0}" = "127.0.0.1" ]; then
+        echo "Backtest web app: http://127.0.0.1:${port:-8095} (private: ssh -L ${port:-8095}:127.0.0.1:${port:-8095} <user>@<server>)"
+      else
+        echo "Backtest web app: http://$(hostname -I | awk '{print $1}'):${port:-8095}"
+      fi
     fi ;;
   backtest) require_env; cmd_backtest "$@" ;;
   test) cmd_test ;;

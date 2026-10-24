@@ -44,11 +44,10 @@ services:
     networks:
       - backend
       - egress
-    # Expose api on port 8080 (localhost only)
-    # Please read the https://www.freqtrade.io/en/stable/rest-api/ documentation
-    # for more information.
+    # FreqUI / API on localhost only. From your PC: ssh -L 8001:127.0.0.1:8001 <server>
+    # See https://www.freqtrade.io/en/stable/rest-api/
     ports:
-      - "8001:8080"
+      - "127.0.0.1:8001:8080"
     # Default command used when running `docker compose up`
     command: >
       trade

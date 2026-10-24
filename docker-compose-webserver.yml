@@ -46,10 +46,12 @@ services:
     networks:
       - backend
       - egress
-    # FreqUI / API on host port 8095 (8080 and 8090 are taken on this server); override with
-    # WEBSERVER_PORT in .env. See https://www.freqtrade.io/en/stable/rest-api/
+    # FreqUI / API on host port 8095 (8080 and 8090 are taken on this server).
+    # Public on all interfaces: use a strong api_server password. To keep it private,
+    # set WEBSERVER_BIND=127.0.0.1 in .env and use an SSH tunnel.
+    # See https://www.freqtrade.io/en/stable/rest-api/
     ports:
-      - "${WEBSERVER_PORT:-8095}:8080"
+      - "${WEBSERVER_BIND:-0.0.0.0}:${WEBSERVER_PORT:-8095}:8080"
     command: >
       webserver
       --logfile /freqtrade/user_data/logs/freqtrade-webserver.log

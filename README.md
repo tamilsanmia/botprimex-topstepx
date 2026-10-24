@@ -175,10 +175,16 @@ A separate web app (FreqUI) for backtests, with its own gateway, so it never tou
 
 ```bash
 ./topstep download       # history for all pairs and timeframes
-./topstep backtest-ui    # open http://<server>:8095
+./topstep backtest-ui    # open http://<server-ip>:8095
 ```
 
-Log in with `api_server.username` / `password` from `user_data/config-futures-backtest.json`. Set a strong password, because the port is public. Then pick `BotPrimeX_TopstepX`, a timeframe and dates, and run.
+Log in with `api_server.username` / `password` from `user_data/config-futures-backtest.json`. Then pick `BotPrimeX_TopstepX`, a timeframe and dates, and run.
+
+The backtest UI is public on port 8095, so use a strong password. To make it private, set `WEBSERVER_BIND=127.0.0.1` in `.env` and use an SSH tunnel. The live bot's UI (port 8001) is always localhost-only:
+
+```bash
+ssh -L 8001:127.0.0.1:8001 <user>@<server>    # then open http://127.0.0.1:8001
+```
 
 **How far back data goes** (a TopstepX limit):
 

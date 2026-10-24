@@ -1,0 +1,5 @@
+.git
+user_data
+projectx-gateway/node_modules
+**/__pycache__
+*.log

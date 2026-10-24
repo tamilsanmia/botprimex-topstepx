@@ -1,0 +1,13 @@
+FROM freqtradeorg/freqtrade:stable
+
+# The projectx package registers the "projectx" exchange with ccxt and provides
+# Freqtrade's Projectx exchange class. Exporting it from freqtrade.exchange is all
+# ExchangeResolver needs; Freqtrade itself is not modified otherwise.
+COPY --chown=ftuser:ftuser projectx /opt/projectx/projectx
+ENV PYTHONPATH=/opt/projectx
+
+USER root
+RUN printf '\n# ProjectX (TopstepX) via projectx-gateway\ntry:\n    from projectx.ft_exchange import Projectx  # noqa: E402,F401\nexcept ImportError:\n    pass  # projectx.ft_exchange imported first; it registers itself when done\n' \
+      >> /freqtrade/freqtrade/exchange/__init__.py
+USER ftuser
+RUN python -c "import freqtrade.exchange as e, ccxt; assert e.Projectx and 'projectx' in ccxt.exchanges"

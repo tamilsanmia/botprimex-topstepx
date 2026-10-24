@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# topstep - one command for the BotPrimeX TopstepX (ProjectX) bot.
+# Run `./topstep --help` for the list of commands.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+LIVE=(docker compose -f docker-compose.yml)
+BT=(docker compose -f docker-compose-webserver.yml)
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+die() { echo "error: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: ./topstep <command> [options]
+
+Setup
+  setup                 Create .env and user_data/ (configs, strategies) if missing
+  build                 Build the Docker images (gateway + Freqtrade)
+  accounts              List your TopstepX accounts and which one the bot uses
+
+Live / dry-run bot
+  start                 Start the gateway and the bot (docker-compose.yml)
+  stop                  Stop them
+  restart               Restart them
+  logs [gateway|bot]    Follow logs (default: both)
+  status                Gateway health: hubs, account, rate limits, latency
+  guard                 Account protection state: P&L, loss limits, contracts
+  reset-day             Clear today's lock (Daily Loss Limit, giveback)
+  reset-account         Clear an account lock (Max Loss Limit buffer, target passed)
+
+Backtesting
+  download [options]    Download history (see: ./topstep download --help)
+  backtest-ui [stop]    Start (or stop) the backtest web app (FreqUI)
+  backtest [timerange]  Run a backtest in the terminal, e.g. 20260901-
+
+Checks
+  test                  Run the gateway and Python unit tests
+  config                Validate both compose files and all configs
+
+  -h, --help            Show this help
+
+Examples
+  ./topstep setup && ./topstep build && ./topstep accounts
+  ./topstep start && ./topstep logs gateway
+  ./topstep download && ./topstep backtest-ui
+EOF
+}
+
+require_env() {
+  [ -f .env ] || die ".env is missing. Run: ./topstep setup"
+}
+
+# GET/POST to the gateway from inside its container (it has no published port).
+gateway_call() {
+  local method="$1" path="$2" body="${3:-}"
+  "${LIVE[@]}" ps --status running projectx-gateway | grep -q projectx-gateway \
+    || die "the gateway is not running. Run: ./topstep start"
+  "${LIVE[@]}" exec -T projectx-gateway node -e '
+    const [path, method, body] = process.argv.slice(1);
+    fetch("http://127.0.0.1:" + (process.env.GATEWAY_PORT || 8787) + path, {
+      method, body: body || undefined,
+      headers: { "x-gateway-secret": process.env.GATEWAY_SECRET || "", "content-type": "application/json" },
+    }).then((r) => r.text()).then((t) => process.stdout.write(t)).catch((e) => { console.error(e.message); process.exit(1); });
+  ' "$path" "$method" "$body"
+}
+
+print_guard() {
+  node_format='
+    let g = ""; process.stdin.on("data", (d) => (g += d)).on("end", () => {
+      g = JSON.parse(g); const m = g.metrics || {};
+      const reasons = (g.reasons || []).map((r) => r.code).join(", ") || "none";
+      const rows = [
+        ["Status", g.status + (g.flatten ? "  (closing positions: " + g.flattenReasons.join(", ") + ")" : "")],
+        ["Reasons", reasons],
+        ["Phase / trading day", (g.phase || "-") + " / " + (g.tradingDay || "-")],
+        ["Balance / equity", m.balance + " / " + m.equity],
+        ["Day P&L", m.dayPnl + "   (Daily Loss Limit left: " + m.dayLossRemaining + ")"],
+        ["Max Loss floor", m.mllFloor + "   (room: " + m.mllRoom + ", " + m.mllType + ")"],
+        ["Profit target", (m.profitTarget ?? "-") + "   (progress: " + (m.targetProgressPct ?? "-") + "%)"],
+        ["Contracts (minis)", m.exposureMini + " / " + m.maxMiniEquivalent],
+        ["Entries today / losses in a row", m.entriesToday + " / " + m.consecutiveLosses],
+      ];
+      for (const [k, v] of rows) console.log(k.padEnd(32) + v);
+    });'
+  gateway_call GET /guard | "${LIVE[@]}" exec -T projectx-gateway node -e "$node_format"
+}
+
+cmd_setup() {
+  if [ ! -f .env ]; then
+    cp .env.example .env
+    secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    sed -i "s/^GATEWAY_SECRET=$/GATEWAY_SECRET=$secret/" .env
+    chmod 600 .env
+    echo "created .env (fill in PROJECTX_USERNAME and PROJECTX_API_KEY)"
+  else
+    echo ".env already exists"
+  fi
+  mkdir -p user_data/strategies user_data/logs
+  [ -f user_data/config.json ] || { cp config_projectx.example.json user_data/config.json; echo "created user_data/config.json"; }
+  [ -f user_data/config-futures-backtest.json ] || { cp config_backtest.example.json user_data/config-futures-backtest.json; echo "created user_data/config-futures-backtest.json"; }
+  cp BotPrimeX.py BotPrimeX_TopstepX.py user_data/strategies/
+  echo "copied strategies to user_data/strategies/"
+  chown -R 1000:1000 user_data 2>/dev/null || true
+  echo
+  bold "Next:"
+  echo "  1. Edit .env: PROJECTX_USERNAME, PROJECTX_API_KEY (and PROJECTX_ACCOUNT_ID)"
+  echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance, api_server password"
+  echo "  3. ./topstep build && ./topstep accounts && ./topstep start"
+}
+
+cmd_download() {
+  if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    cat <<'EOF'
+Usage: ./topstep download [START_DATE] 
+       Environment options (combine as needed):
+         START_DATE=20260101   first day (default: 365 days ago)
+         END_DATE=20261024     last day (default: today)
+         PAIRS="MES/USD:USD MNQ/USD:USD"   only these pairs (default: config whitelist)
+         TIMEFRAMES="5m 1h 4h"             only these timeframes (default: 1m 5m 15m 30m 1h 2h 4h 1d)
+         ERASE=1               delete and re-download (do this after a contract roll)
+
+ProjectX keeps 1h+ bars for about a year and minute bars for about 60 days.
+Examples:
+  ./topstep download
+  ./topstep download 20260601
+  PAIRS="MES/USD:USD" TIMEFRAMES="5m 1h" ./topstep download
+EOF
+    return
+  fi
+  [ -n "${1:-}" ] && export START_DATE="$1"
+  ./download-data.sh
+}
+
+cmd_backtest() {
+  local range="${1:-}"
+  local args=(backtesting --config /freqtrade/user_data/config-futures-backtest.json --strategy BotPrimeX_TopstepX)
+  [ -n "$range" ] && args+=(--timerange "$range")
+  "${BT[@]}" run --rm freqtrade-webserver "${args[@]}"
+}
+
+cmd_test() {
+  bold "Gateway tests"
+  docker run --rm -v "$PWD/projectx-gateway/test:/app/test:ro" botprimex/projectx-gateway:latest node --test test/ 2>&1 \
+    | grep -E "^# (tests|pass|fail)|^not ok"
+  bold "Python tests"
+  docker run --rm -v "$PWD/tests:/tests:ro" --entrypoint bash botprimex/freqtrade-projectx:latest \
+    -c "pip install --user -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider /tests 2>&1 | tail -1"
+}
+
+cmd_config() {
+  "${LIVE[@]}" config -q && echo "docker-compose.yml ok"
+  "${BT[@]}" config -q && echo "docker-compose-webserver.yml ok"
+  for f in user_data/config.json user_data/config-futures-backtest.json; do
+    [ -f "$f" ] || { echo "$f missing (./topstep setup)"; continue; }
+    docker run --rm -v "$PWD/$f:/c.json:ro" botprimex/projectx-gateway:latest node -e '
+      import("/app/src/config.js").then(({ parseLenientJson }) => {
+        parseLenientJson(require("fs").readFileSync("/c.json", "utf8"));
+        console.log(process.argv[1] + " ok");
+      }).catch((e) => { console.log(process.argv[1] + " INVALID: " + e.message); process.exit(1); });
+    ' "$f"
+  done
+}
+
+command="${1:-}"
+[ $# -gt 0 ] && shift
+case "$command" in
+  ""|-h|--help|help) usage ;;
+  setup) cmd_setup ;;
+  build) require_env; "${LIVE[@]}" build ;;
+  accounts) require_env; "${LIVE[@]}" run --rm --no-deps projectx-gateway node src/accounts.js 2>&1 | grep -vE "not found, using defaults|Network|Container" ;;
+  start) require_env; [ -f user_data/config.json ] || die "user_data/config.json is missing. Run: ./topstep setup"; "${LIVE[@]}" up -d ;;
+  stop) "${LIVE[@]}" down ;;
+  restart) "${LIVE[@]}" restart ;;
+  logs)
+    case "${1:-}" in
+      gateway) "${LIVE[@]}" logs -f --tail=100 projectx-gateway ;;
+      bot|freqtrade) "${LIVE[@]}" logs -f --tail=100 freqtrade ;;
+      *) "${LIVE[@]}" logs -f --tail=50 ;;
+    esac ;;
+  status) gateway_call GET /status | "${LIVE[@]}" exec -T projectx-gateway node -e '
+      let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        s = JSON.parse(s);
+        console.log("Ready              " + s.ready + (s.mock ? "  (MOCK upstream)" : ""));
+        console.log("Mode               " + (s.dryRun ? "dry-run" : "LIVE") + "  (guard source: " + s.guardSource + ")");
+        console.log("Market hub         " + (s.marketHub?.state || "-") + "  live: " + (s.marketHub?.live || []).join(" "));
+        console.log("User hub           " + (s.userHub?.state || "-") + "  account: " + (s.userHub?.account ? s.userHub.account.id + " " + s.userHub.account.name : s.userHub?.accountError || "-"));
+        console.log("REST latency       " + Math.round(s.upstream?.latency?.avgMs || 0) + " ms avg");
+        console.log("Rate limits used   bars " + s.rateLimits.bars.used + "/" + s.rateLimits.bars.limit + " per 30s, other " + s.rateLimits.other.used + "/" + s.rateLimits.other.limit + " per 60s");
+        console.log("Candle series      " + (s.candles || []).length + "   ticks recorded: " + (s.ticks?.written ?? 0));
+      });' ;;
+  guard) print_guard ;;
+  reset-day) gateway_call POST /guard/reset '{"scope":"day"}' >/dev/null && echo "day lock cleared" && print_guard ;;
+  reset-account) gateway_call POST /guard/reset '{"scope":"account"}' >/dev/null && echo "account lock cleared" && print_guard ;;
+  download) require_env; cmd_download "$@" ;;
+  backtest-ui)
+    require_env
+    if [ "${1:-}" = "stop" ]; then "${BT[@]}" down; else
+      "${BT[@]}" up -d
+      port="${WEBSERVER_PORT:-$(grep -E '^WEBSERVER_PORT=' .env | cut -d= -f2 || true)}"
+      echo "Backtest web app: http://<server>:${port:-8095}"
+    fi ;;
+  backtest) require_env; cmd_backtest "$@" ;;
+  test) cmd_test ;;
+  config) cmd_config ;;
+  *) echo "unknown command: $command" >&2; echo; usage; exit 1 ;;
+esac

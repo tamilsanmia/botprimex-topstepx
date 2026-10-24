@@ -1,0 +1,21 @@
+{
+  "name": "projectx-gateway",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Real-time ProjectX (TopstepX) gateway for Freqtrade: market and user hubs, local candles, order routing and Topstep account protection.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "mock": "PROJECTX_MOCK=1 node src/index.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "10.0.11",
+    "better-sqlite3": "12.4.1",
+    "ws": "8.18.3"
+  }
+}

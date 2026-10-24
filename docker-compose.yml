@@ -1,0 +1,63 @@
+---
+# Freqtrade on ProjectX (TopstepX) through the projectx-gateway sidecar.
+#
+#   projectx-gateway  holds the ProjectX session, the SignalR market and user hubs,
+#                     the tick-built candle store, the order router and the
+#                     Topstep AccountGuard. No published port: only Freqtrade can
+#                     reach it, over the internal "backend" network.
+#   freqtrade         custom image with the "projectx" exchange registered.
+#
+# Credentials live in .env (see .env.example), never in config.json.
+services:
+  projectx-gateway:
+    build:
+      context: ./projectx-gateway
+    image: botprimex/projectx-gateway:latest
+    container_name: projectx-gateway
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FREQTRADE_CONFIG: /freqtrade/user_data/config.json
+      GATEWAY_PORT: "8787"
+    volumes:
+      # Reads config.json (topstep + projectx_gateway blocks); writes guard state
+      # (topstep_state.*.json) and the tick recorder (ticks/).
+      - "./user_data:/freqtrade/user_data"
+    networks:
+      - backend
+      - egress
+
+  freqtrade:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.freqtrade
+    image: botprimex/freqtrade-projectx:latest
+    restart: unless-stopped
+    container_name: freqtrade
+    depends_on:
+      projectx-gateway:
+        condition: service_healthy
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:?set GATEWAY_SECRET in .env}
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    networks:
+      - backend
+      - egress
+    # Expose api on port 8080 (localhost only)
+    # Please read the https://www.freqtrade.io/en/stable/rest-api/ documentation
+    # for more information.
+    ports:
+      - "8001:8080"
+    # Default command used when running `docker compose up`
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --config /freqtrade/user_data/config.json
+      --strategy BotPrimeX_TopstepX
+
+networks:
+  backend:
+    internal: true
+  egress: {}

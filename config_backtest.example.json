@@ -1,0 +1,132 @@
+{
+  // Backtesting config for TopstepX futures (FreqUI webserver + download-data).
+  // Copy to user_data/config-futures-backtest.json. Credentials stay in .env.
+  "bot_name": "botprimex-topstepx-backtest",
+  "strategy": "BotPrimeX_TopstepX",
+  "max_open_trades": 4,
+  "stake_currency": "USD",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 1,
+  "dry_run": true,
+  "dry_run_wallet": 50000,
+  "fiat_display_currency": "USD",
+  "timeframe": "5m",
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "unfilledtimeout": { "unit": "minutes", "enter": 2, "exit": 2 },
+  "order_types": {
+    "entry": "market",
+    "exit": "market",
+    "emergency_exit": "market",
+    "force_entry": "market",
+    "force_exit": "market",
+    "stoploss": "market",
+    "stoploss_on_exchange": false
+  },
+  "entry_pricing": { "price_side": "other", "use_order_book": false, "price_last_balance": 0.0,
+                     "check_depth_of_market": { "enabled": false, "bids_to_ask_delta": 1 } },
+  "exit_pricing": { "price_side": "other", "use_order_book": false, "price_last_balance": 0.0 },
+  "exchange": {
+    "name": "projectx",
+    "key": "",
+    "secret": "",
+    "enable_ws": false,
+    "use_public_trades": false,
+    "ccxt_config": {
+      "options": { "gatewayUrl": "http://projectx-gateway:8787", "maxLeverage": 50, "maxOrderSize": 50 }
+    },
+    "ccxt_async_config": {},
+    "pair_whitelist": [
+      "MES/USD:USD", "ES/USD:USD",
+      "MNQ/USD:USD", "NQ/USD:USD",
+      "M2K/USD:USD", "RTY/USD:USD",
+      "MYM/USD:USD", "YM/USD:USD",
+      "MGC/USD:USD", "GC/USD:USD",
+      "SIL/USD:USD", "MHG/USD:USD",
+      "MCL/USD:USD", "CL/USD:USD",
+      "MBT/USD:USD", "MET/USD:USD"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [{ "method": "StaticPairList" }],
+  "dataformat_ohlcv": "feather",
+
+  "projectx_gateway": {
+    "account": "auto",
+    "live_data": false,
+    // Lower than the live gateway's limits: both share your ProjectX rate limits.
+    "rate_limits": { "bars_per_30s": 30, "other_per_60s": 60 },
+    "ticks": { "record": false },
+    // One continuous series per pair across contract rolls. "back" shifts older
+    // contracts by the roll gap (no price jumps); "none" keeps raw prices.
+    // ProjectX keeps hour/day bars ~1 year, minute bars ~60 days, second bars ~3 weeks.
+    "history": { "continuous": true, "adjust": "back", "retention_days": 400,
+                 "minute_retention_days": 61, "second_retention_days": 21 }
+  },
+
+  "topstep": {
+    "enabled": true,
+    // Set these to the account you want to simulate.
+    "phase": "evaluation",
+    "preset": "50k",
+    "start_balance": 50000,
+    "timezone": "America/New_York",
+    "session": {
+      "reset_time": "18:00", "eod_time": "16:10",
+      "no_entry_before": "18:05", "no_entry_after": "15:45", "flat_by": "16:05",
+      "hold_mode": "intraday", "trading_windows": [], "trade_weekends": false,
+      "news_blackout": [{ "days": "mon-fri", "start": "08:28", "end": "08:35", "label": "8:30 data" }]
+    },
+    "lots": { "micro_ratio": 10, "block_mini_micro_overlap": true, "overrides": {} },
+    "phases": {
+      "evaluation": {
+        "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
+        "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": null,
+        "session": {}, "consistency_pct": 50, "max_mini_equivalent": null,
+        // false keeps trading after the target is passed, for strategy research.
+        // true stops the backtest at the pass, like a real evaluation.
+        "stop_on_target": false
+      },
+      "funded": {
+        "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
+        "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": 0,
+        "session": {}, "consistency_pct": null, "scaling_plan": null,
+        "payout": { "min_winning_days": 5, "min_winning_day_amount": 150 }
+      }
+    },
+    "protection": {
+      "dll_soft_pct": 70, "dll_hard_pct": 90, "mll_buffer": 300,
+      "max_risk_per_trade": 250, "max_trades_per_day": 10, "max_consecutive_losses": 3,
+      "daily_profit_lock": { "enabled": true, "activate_at": 800, "giveback_pct": 40 }
+    }
+  },
+
+  "topstep_strategy": {
+    "stop_atr_period": 14,
+    "stop_atr_mult": 2.0,
+    "min_stop_ticks": 8,
+    "max_stop_ticks": 400,
+    "max_contracts_per_trade": 10,
+    "partial_exit_min_contracts": 2,
+    "roll_guard_days": 2,
+    "leverage": 50,
+    "notify_guard_changes": false,
+    "seconds_mode": { "startup_candle_count": 300, "protection_minutes": 5 }
+  },
+  "topstep_orderflow": { "enabled": false },
+
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "change-me-to-a-long-random-string",
+    "ws_token": "change-me",
+    "CORS_origins": [],
+    "username": "admin",
+    "password": "change-me"
+  },
+  "telegram": { "enabled": false, "token": "", "chat_id": "" },
+  "internals": { "process_throttle_secs": 5 }
+}

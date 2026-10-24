@@ -1,0 +1,190 @@
+{
+  // Freqtrade on ProjectX (TopstepX). Copy to user_data/config.json.
+  // Credentials are NOT in this file: put them in .env (see .env.example).
+  "bot_name": "botprimex-topstepx",
+  "db_url": "sqlite:////freqtrade/user_data/tradesv3.sqlite",
+  "max_open_trades": 4,
+  "stake_currency": "USD",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 1,
+  "dry_run": true,
+  "dry_run_wallet": 50000,
+  "fiat_display_currency": "USD",
+  "timeframe": "5m",
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "cancel_open_orders_on_exit": false,
+  "unfilledtimeout": { "unit": "minutes", "enter": 2, "exit": 2 },
+  "order_types": {
+    "entry": "market",
+    "exit": "market",
+    "emergency_exit": "market",
+    "force_entry": "market",
+    "force_exit": "market",
+    "stoploss": "market",
+    "stoploss_on_exchange": true,
+    "stoploss_on_exchange_interval": 5
+  },
+  // Level 1 data only on TopstepX: no order book pricing.
+  "entry_pricing": { "price_side": "other", "use_order_book": false, "price_last_balance": 0.0,
+                     "check_depth_of_market": { "enabled": false, "bids_to_ask_delta": 1 } },
+  "exit_pricing": { "price_side": "other", "use_order_book": false, "price_last_balance": 0.0 },
+  "exchange": {
+    "name": "projectx",
+    "key": "",
+    "secret": "",
+    // Live candles over the gateway websocket (ccxt.pro watch_ohlcv).
+    "enable_ws": true,
+    // Freqtrade's native order flow from the gateway's tick recorder.
+    // Leave false until a few sessions of ticks are recorded, then enable.
+    "use_public_trades": false,
+    "ccxt_config": {
+      "options": { "gatewayUrl": "http://projectx-gateway:8787", "maxLeverage": 50, "maxOrderSize": 50 }
+    },
+    "ccxt_async_config": {},
+    // TopstepX contracts, as ROOT/USD:USD. Each root follows the current front month.
+    // Holding a mini and its micro together (ES + MES, NQ + MNQ, CL + MCL ...) is blocked
+    // by topstep.lots.block_mini_micro_overlap, so listing both lets the first signal pick.
+    // Also available: NKD, PL, HO, RB, MNG, NG, QG, QM, SI, HG,
+    //   FX 6A 6B 6C 6E 6J 6M 6N 6S E7 M6A M6B M6E,
+    //   rates ZT ZF ZN TN ZB UB, ags ZC ZS ZW ZL ZM HE LE (shorter sessions).
+    "pair_whitelist": [
+      "MES/USD:USD", "ES/USD:USD",
+      "MNQ/USD:USD", "NQ/USD:USD",
+      "M2K/USD:USD", "RTY/USD:USD",
+      "MYM/USD:USD", "YM/USD:USD",
+      "MGC/USD:USD", "GC/USD:USD",
+      "SIL/USD:USD", "MHG/USD:USD",
+      "MCL/USD:USD", "CL/USD:USD",
+      "MBT/USD:USD", "MET/USD:USD"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [{ "method": "StaticPairList" }],
+  "internals": { "process_throttle_secs": 1 },
+
+  // Freqtrade native order flow settings (used when exchange.use_public_trades is true).
+  // scale = price bin: 0.25 for ES/MES/NQ/MNQ, 0.1 for GC/MGC, 0.01 for CL/MCL.
+  "orderflow": { "cache_size": 1000, "max_candles": 500, "scale": 0.25,
+                 "stacked_imbalance_range": 3, "imbalance_volume": 1, "imbalance_ratio": 3 },
+
+  "projectx_gateway": {
+    // "auto" picks the only tradeable account; with several, set the id or name.
+    "account": "auto",
+    // Must match the account's data subscription or the contract list is empty.
+    "live_data": false,
+    // How long a market order waits for its fill event before returning.
+    "fill_wait_ms": 1500,
+    // "separate": Freqtrade's own stop order. "native": also attach a stopLossBracket
+    // sized to max_risk_per_trade (account must be in Auto OCO Brackets mode).
+    "brackets": "separate",
+    "reconcile_secs": 30,
+    "flatten_grace_secs": 30,
+    "backfill_candles": 1500,
+    "max_candles": 5000,
+    "max_order_size": 50,
+    // "auto": dry-run -> guard runs on Freqtrade's simulated trades; live -> ProjectX account.
+    "account_source": "auto",
+    // "auto": adds the account size to an Express Funded Account's $0 balance for sizing.
+    "balance_offset": "auto",
+    "rate_limits": { "bars_per_30s": 40, "other_per_60s": 180 },
+    "ticks": { "record": true, "retention_days": 30, "pairs": "whitelist" },
+    "orderflow": { "block_multiple": 25, "value_area_pct": 70 }
+  },
+
+  "topstep": {
+    // false disables every Topstep rule and protection (not recommended).
+    "enabled": true,
+    // "auto" reads phase and size from the account name: 50KTC -> evaluation 50K,
+    // XFA -> funded (starts at $0), LFA -> live_funded.
+    "phase": "auto",
+    "preset": "auto",
+    "start_balance": "auto",
+    "timezone": "America/New_York",
+    "session": {
+      "reset_time": "18:00", "eod_time": "16:10",
+      "no_entry_before": "18:05", "no_entry_after": "15:45", "flat_by": "16:05",
+      "hold_mode": "intraday",
+      "trading_windows": [],
+      "trade_weekends": false,
+      "news_blackout": [{ "days": "mon-fri", "start": "08:28", "end": "08:35", "label": "8:30 data" }]
+    },
+    "lots": { "micro_ratio": 10, "block_mini_micro_overlap": true, "overrides": {} },
+    // null = take the value from the preset for the account size. Set a number to override.
+    "phases": {
+      "evaluation": {
+        "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
+        "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": null,
+        "session": {}, "consistency_pct": 50, "max_mini_equivalent": null, "stop_on_target": true
+      },
+      "funded": {
+        "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
+        "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": 0,
+        "session": {}, "consistency_pct": null,
+        "scaling_plan": null,
+        "payout": { "min_winning_days": 5, "min_winning_day_amount": 150 }
+      }
+    },
+    "protection": {
+      "dll_soft_pct": 70, "dll_hard_pct": 90, "mll_buffer": 300,
+      "max_risk_per_trade": 250, "max_trades_per_day": 10, "max_consecutive_losses": 3,
+      "daily_profit_lock": { "enabled": true, "activate_at": 800, "giveback_pct": 40 }
+    }
+  },
+
+  // BotPrimeX_TopstepX strategy settings.
+  "topstep_strategy": {
+    // Protective stop distance: ATR(period) x mult, clamped to [min, max] ticks.
+    // Contracts per trade = floor(max_risk_per_trade / (stop ticks x tick value)).
+    "stop_atr_period": 14,
+    "stop_atr_mult": 2.0,
+    "min_stop_ticks": 8,
+    "max_stop_ticks": 400,
+    "max_contracts_per_trade": 10,
+    "partial_exit_min_contracts": 2,
+    "roll_guard_days": 2,
+    "leverage": 50,
+    "notify_guard_changes": true,
+    // Experimental 1s-30s strategy timeframes.
+    "seconds_mode": { "startup_candle_count": 300, "protection_minutes": 5 }
+  },
+  "topstep_orderflow": {
+    "enabled": false,
+    "confirm_delta_candles": 3,
+    "block_against_stacked_imbalance": true,
+    "cvd_divergence_exit": false,
+    "cvd_divergence_lookback": 20
+  },
+
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": "",
+    "allow_custom_messages": true,
+    "notification_settings": {
+      "status": "silent", "warning": "on", "startup": "off", "entry": "silent", "entry_fill": "on",
+      "entry_cancel": "silent",
+      "exit": { "roi": "silent", "emergency_exit": "on", "force_exit": "on", "exit_signal": "silent",
+                "trailing_stop_loss": "on", "stop_loss": "on", "stoploss_on_exchange": "on",
+                "custom_exit": "on", "partial_exit": "on" },
+      "exit_cancel": "on", "exit_fill": "on", "protection_trigger": "off",
+      "protection_trigger_global": "on", "strategy_msg": "on", "show_candle": "off"
+    },
+    "reload": true,
+    "balance_dust_level": 0.01
+  },
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "change-me-to-a-long-random-string",
+    "ws_token": "change-me",
+    "CORS_origins": [],
+    "username": "admin",
+    "password": "change-me"
+  },
+  "initial_state": "running",
+  "force_entry_enable": false
+}

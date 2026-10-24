@@ -1,0 +1,61 @@
+---
+# Backtesting stack for TopstepX futures: FreqUI (Freqtrade webserver mode) plus
+# its own projectx-gateway for history downloads. Runs alongside the live stack in
+# docker-compose.yml without sharing containers, guard state or tick files.
+#
+#   docker compose -f docker-compose-webserver.yml build
+#   ./download-data.sh                     # history through the gateway
+#   docker compose -f docker-compose-webserver.yml up -d
+#   open http://<server>:8095
+#   docker compose -f docker-compose-webserver.yml down && docker compose -f docker-compose-webserver.yml up -d
+name: botprimex-backtest
+
+services:
+  projectx-gateway:
+    build:
+      context: ./projectx-gateway
+    image: botprimex/projectx-gateway:latest
+    restart: unless-stopped
+    container_name: projectx-gateway-backtest
+    env_file: .env
+    environment:
+      FREQTRADE_CONFIG: /freqtrade/user_data/config-futures-backtest.json
+      # Separate state and tick directory from the live gateway.
+      GATEWAY_DATA_DIR: /freqtrade/user_data/backtest-gateway
+      GATEWAY_PORT: "8787"
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    networks:
+      - backend
+      - egress
+
+  freqtrade-webserver:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.freqtrade
+    image: botprimex/freqtrade-projectx:latest
+    restart: unless-stopped
+    container_name: freqtrade-webserver
+    depends_on:
+      projectx-gateway:
+        condition: service_healthy
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:?set GATEWAY_SECRET in .env}
+    volumes:
+      - "./user_data:/freqtrade/user_data"
+    networks:
+      - backend
+      - egress
+    # FreqUI / API on host port 8095 (8080 and 8090 are taken on this server); override with
+    # WEBSERVER_PORT in .env. See https://www.freqtrade.io/en/stable/rest-api/
+    ports:
+      - "${WEBSERVER_PORT:-8095}:8080"
+    command: >
+      webserver
+      --logfile /freqtrade/user_data/logs/freqtrade-webserver.log
+      --config /freqtrade/user_data/config-futures-backtest.json
+
+networks:
+  backend:
+    internal: true
+  egress: {}

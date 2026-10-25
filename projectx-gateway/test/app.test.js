@@ -28,7 +28,43 @@ const buy = (amount, symbol = MES) => ({ symbol, type: 'market', side: 'buy', am
 test('/health reports ready on the mock upstream, without needing the secret', async () => {
   const res = await env.get('/health', { secret: null });
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body, { ok: true, ready: true, mock: true, marketHub: 'connected', startError: null });
+  const { marketHubAgeMs, userHubAgeMs, ...rest } = res.body;
+  assert.deepEqual(rest, {
+    ok: true, ready: true, mock: true, marketHub: 'connected', userHub: 'connected', dataHealth: { ok: true, reasons: [] }, startError: null,
+  });
+  for (const age of [marketHubAgeMs, userHubAgeMs]) assert.ok(age === null || age >= 0, 'hub message age is exposed');
+});
+
+test('/status exposes hub states, message ages, reconcile age and data health', async () => {
+  const res = await env.get('/status');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.marketHub.state, 'connected');
+  assert.ok(res.body.marketHub.stateSince > 0);
+  assert.ok('ageMs' in res.body.marketHub && 'lastMessageAt' in res.body.marketHub);
+  assert.equal(res.body.userHub.state, 'connected');
+  assert.ok(res.body.userHub.reconcileAgeMs >= 0);
+  assert.deepEqual(res.body.dataHealth, { ok: true, reasons: [] });
+});
+
+test('data health reports a stale quote and the guard blocks entries on it', async () => {
+  const { app } = env;
+  app.market.quoteSince = () => Date.now() - 20_000;
+  try {
+    const health = app.dataHealth();
+    assert.equal(health.ok, false);
+    assert.equal(health.reasons[0].code, 'quote_stale');
+    assert.equal(health.reasons[0].root, 'MES');
+    assert.ok(health.reasons[0].ageSecs >= 20);
+    const verdict = app.evaluateGuard();
+    // On a weekend or after flat_by the market is shut and quote staleness is not counted.
+    if (!app.guard.sessionClosed(Date.now())) {
+      assert.equal(verdict.canEnter, false);
+      assert.ok(verdict.reasons.some((r) => r.code === 'data_stale'));
+    }
+  } finally {
+    delete app.market.quoteSince;
+  }
+  assert.equal(app.evaluateGuard().reasons.some((r) => r.code === 'data_stale'), false, 'recovers when quotes are fresh');
 });
 
 test('other routes need the X-Gateway-Secret', async () => {

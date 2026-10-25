@@ -100,6 +100,12 @@
     // and background syncs cannot starve a stop or an exit. max_queue bounds waiting
     // non-order requests: the oldest background one is dropped first, then new reads fail.
     "rate_limits": { "bars_per_30s": 40, "other_per_60s": 180, "order_reserve": 20, "max_queue": 500 },
+    // Stale data protection. A market quote (per whitelisted pair), a hub or the REST
+    // reconcile that has been silent for block_entries_secs blocks new entries; with a
+    // position open, flatten_secs flattens it through REST (0 = never flatten). Quote
+    // staleness is ignored on weekends and from flat_by until the session reset.
+    // notify sends a Telegram message when data goes stale and when it recovers.
+    "stale": { "block_entries_secs": 15, "flatten_secs": 120, "notify": true },
     "ticks": { "record": true, "retention_days": 30, "pairs": "whitelist" },
     "orderflow": { "block_multiple": 25, "value_area_pct": 70 }
   },

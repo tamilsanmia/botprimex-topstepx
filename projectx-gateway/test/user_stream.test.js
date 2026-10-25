@@ -443,3 +443,78 @@ test('start loads recent orders and trades into the cache before reconciling', a
     await user.stop();
   }
 });
+
+/* ----------------------------------------------- reconcile on every connect -- */
+
+/** A hub whose lifecycle callbacks the test can fire. */
+function drivableHub(registry) {
+  return () => {
+    const hub = {
+      invocations: [],
+      on() {},
+      onreconnecting() {},
+      onreconnected(fn) { hub.reconnected = fn; },
+      onclose(fn) { hub.closed = fn; },
+      async start() {},
+      async stop() {},
+      async invoke(...args) { hub.invocations.push(args); },
+    };
+    registry.push(hub);
+    return hub;
+  };
+}
+
+test('every hub connect, including a SignalR reconnect, replaces the cached state with a REST reconcile', async (t) => {
+  quiet(t);
+  const client = fakeClient();
+  const hubs = [];
+  const user = new UserStream({ client, url: 'u', tokenFactory: () => 't', hubFactory: drivableHub(hubs), reconcileSecs: 3600 });
+  await user.start({ tradesSince: 0 });
+  try {
+    const initial = client.callsOf('searchOpenPositions').length;
+    assert.ok(initial >= 2, 'start() reconciles, and the first connect reconciles again');
+
+    // The socket dropped for a while: a fill and a position change were missed.
+    client.positionRows = [position('MES', { size: 2 })];
+    client.orderRows = [orderRow('MES', { id: 77 })];
+    assert.equal(user.positions.size, 0);
+
+    await hubs[0].reconnected();
+
+    assert.equal(client.callsOf('searchOpenPositions').length, initial + 1, 'a REST reconcile ran on the reconnect');
+    assert.equal(user.positionFor(contractIdOf('MES')).size, 2, 'the missed position is picked up');
+    assert.ok(user.orders.has(77), 'and the missed order');
+    assert.deepEqual(hubs[0].invocations.map((i) => i[0]), [
+      'SubscribeAccounts', 'SubscribeOrders', 'SubscribePositions', 'SubscribeTrades',
+      'SubscribeAccounts', 'SubscribeOrders', 'SubscribePositions', 'SubscribeTrades',
+    ], 'resubscribed first, then reconciled');
+    assert.equal(user.hub.state, 'connected');
+  } finally {
+    await user.stop();
+  }
+});
+
+test('a reconcile that fails after connecting only warns, the hub still counts as connected', async (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  t.mock.method(console, 'log', () => {});
+  const client = fakeClient();
+  const hubs = [];
+  const user = new UserStream({ client, url: 'u', tokenFactory: () => 't', hubFactory: drivableHub(hubs), reconcileSecs: 3600 });
+  await user.start({ tradesSince: 0 });
+  try {
+    client.fail.searchOpenPositions = new Error('REST is down');
+    await hubs[0].reconnected();
+    assert.equal(user.hub.state, 'connected');
+    assert.ok(warn.mock.calls.some((c) => /reconcile after connect failed: REST is down/.test(c.arguments[0])));
+  } finally {
+    await user.stop();
+  }
+});
+
+test('status reports how long ago the last successful reconcile was', async () => {
+  const { user } = setup();
+  assert.equal(user.status().reconcileAgeMs, null);
+  await user.reconcile();
+  const age = user.status().reconcileAgeMs;
+  assert.ok(age >= 0 && age < 1000);
+});

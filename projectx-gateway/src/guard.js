@@ -14,6 +14,8 @@ export const STATUS = Object.freeze({
 
 const RANK = { active: 0, entries_blocked: 1, day_locked: 2, account_locked: 3 };
 
+const STALE_DEFAULTS = Object.freeze({ block_entries_secs: 15, flatten_secs: 120 });
+
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : v);
 
 function emptyState() {
@@ -68,9 +70,10 @@ export function summarizeFills(trades, dayStart) {
  * the order router (entries refused) and the flatten fallback.
  */
 export class AccountGuard extends EventEmitter {
-  constructor({ resolved, lots, statePath, now = () => Date.now() }) {
+  constructor({ resolved, lots, statePath, now = () => Date.now(), stale = {} }) {
     super();
     this.resolved = resolved;
+    this.stale = { ...STALE_DEFAULTS, ...stale };
     this.rules = resolved.rules;
     this.session = resolved.session;
     this.protection = resolved.protection;
@@ -155,15 +158,54 @@ export class AccountGuard extends EventEmitter {
     return added;
   }
 
+  isWeekend(p) {
+    const t = this.times;
+    return p.weekday === 6
+      || (p.weekday === 5 && p.minutes >= t.flatBy)
+      || (p.weekday === 0 && p.minutes < t.reset);
+  }
+
+  /**
+   * True while the market is shut (weekend, or flat_by until the reset, which
+   * also covers the CME maintenance break), so no quotes are expected. This
+   * ignores hold_mode and trade_weekends on purpose: they decide what the bot may
+   * do, not whether the exchange is quoting.
+   */
+  sessionClosed(now) {
+    const p = this.clock.local(now);
+    return this.isWeekend(p) || inWindow(p.minutes, this.times.flatBy, this.times.reset);
+  }
+
+  /**
+   * Turns input.dataHealth reasons ({ code, root?, since }) into entry blocks and
+   * a flatten flag. A reason counts once it is block_entries_secs old and counts
+   * towards flatten at flatten_secs. Quote staleness is not counted while the
+   * market is shut, and never reaches back before the current session's reopen.
+   */
+  staleness(health, now, dayStart) {
+    const out = { block: [], flatten: false };
+    const blockMs = Number(this.stale.block_entries_secs) * 1000;
+    const flattenMs = Number(this.stale.flatten_secs) * 1000;
+    const closed = this.sessionClosed(now);
+    for (const r of health?.reasons || []) {
+      const quote = r.code === 'quote_stale';
+      if (quote && closed) continue;
+      const reported = Number(r.since);
+      const since = quote ? Math.max(Number.isFinite(reported) ? reported : 0, dayStart) : (Number.isFinite(reported) ? reported : 0);
+      const age = now - since;
+      if (age < blockMs) continue;
+      out.block.push(`${r.code}${r.root ? ` ${r.root}` : ''} ${Math.round(age / 1000)}s`);
+      if (flattenMs > 0 && age >= flattenMs) out.flatten = true;
+    }
+    return out;
+  }
+
   sessionFlags(now) {
     const p = this.clock.local(now);
     const t = this.times;
     const out = { blockEntries: [], flatten: [] };
 
-    const weekend = p.weekday === 6
-      || (p.weekday === 5 && p.minutes >= t.flatBy)
-      || (p.weekday === 0 && p.minutes < t.reset);
-    if (weekend && !this.session.trade_weekends) {
+    if (this.isWeekend(p) && !this.session.trade_weekends) {
       out.blockEntries.push('weekend');
       out.flatten.push('weekend');
       return out;
@@ -188,6 +230,7 @@ export class AccountGuard extends EventEmitter {
    * @param input.closedResults net result of each close today, in order
    * @param input.entriesToday  entry fills today
    * @param input.legs          [{ root, contracts }] open positions + working entries
+   * @param input.dataHealth    { reasons: [{ code, root?, since }] } stale or missing market/account data
    */
   evaluate(input) {
     const now = input.now ?? this.now();
@@ -305,10 +348,14 @@ export class AccountGuard extends EventEmitter {
 
     const session = this.sessionFlags(now);
     for (const code of session.blockEntries) add(STATUS.ENTRIES_BLOCKED, code, null);
+    const stale = this.staleness(input.dataHealth, now, day.start);
+    if (stale.block.length) add(STATUS.ENTRIES_BLOCKED, 'data_stale', stale.block.join('; '));
 
     const status = reasons.reduce((acc, x) => (RANK[x.level] > RANK[acc] ? x.level : acc), STATUS.ACTIVE);
     const flattenReasons = [...session.flatten];
     if (status === STATUS.DAY_LOCKED || status === STATUS.ACCOUNT_LOCKED) flattenReasons.unshift(status);
+    // Flatten uses REST, which works without the hubs, so stale data with a position open closes it.
+    if (stale.flatten && legs.some((l) => Math.abs(Number(l.contracts)) > 0)) flattenReasons.push('data_stale');
 
     const winningDays = r.payout
       ? Object.values(s.days).filter((d) => d.pnl >= r.payout.min_winning_day_amount).length

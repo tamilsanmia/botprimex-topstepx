@@ -31,10 +31,12 @@ export class ManagedHub {
     this.stopping = false;
     this.lastMessageAt = 0;
     this.connectedAt = 0;
+    this.stateAt = 0;
   }
 
   setState(state, info) {
     this.state = state;
+    this.stateAt = Date.now();
     this.onState(state, info);
   }
 
@@ -124,7 +126,13 @@ export class ManagedHub {
   }
 
   status() {
-    return { state: this.state, lastMessageAt: this.lastMessageAt || null, connectedAt: this.connectedAt || null };
+    return {
+      state: this.state,
+      lastMessageAt: this.lastMessageAt || null,
+      ageMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null,
+      connectedAt: this.connectedAt || null,
+      stateSince: this.stateAt || null,
+    };
   }
 }
 

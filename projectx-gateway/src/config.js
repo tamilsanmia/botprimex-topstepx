@@ -61,6 +61,9 @@ const GATEWAY_DEFAULTS = Object.freeze({
   // Freqtrade has not within grace_secs, flattens after flatten_after_secs),
   // 'native' (only the stopLossBracket path) or 'off'.
   protective_stop: { mode: 'gateway', grace_secs: 10, flatten_after_secs: 30 },
+  // Market or account data older than block_entries_secs blocks entries; open
+  // positions are flattened once it is older than flatten_secs (0 = never flatten).
+  stale: { block_entries_secs: 15, flatten_secs: 120, notify: true },
   ticks: { record: true, retention_days: 30, pairs: 'whitelist' },
   history: { continuous: true, adjust: 'back', retention_days: 400, minute_retention_days: 61, second_retention_days: 15 },
   orderflow: { block_multiple: 25, value_area_pct: 70 },

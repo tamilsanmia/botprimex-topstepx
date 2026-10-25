@@ -63,7 +63,7 @@ test('start connects once, runs onReady with reconnected:false and reports statu
   t.mock.method(console, 'log', () => {});
   const { hub, registry, ready, states } = setup({ handlers: { Ping: () => {} } });
   assert.equal(hub.state, 'idle');
-  assert.deepEqual(hub.status(), { state: 'idle', lastMessageAt: null, connectedAt: null });
+  assert.deepEqual(hub.status(), { state: 'idle', lastMessageAt: null, ageMs: null, connectedAt: null, stateSince: null });
 
   await hub.start();
 
@@ -80,9 +80,12 @@ test('start connects once, runs onReady with reconnected:false and reports statu
   assert.equal(status.state, 'connected');
   assert.ok(status.connectedAt > 0);
   assert.equal(status.lastMessageAt, null);
+  assert.equal(status.ageMs, null);
+  assert.ok(status.stateSince > 0, 'the time of the last state change is exposed');
 
   registry.hubs[0].emit('Ping');
   assert.ok(hub.status().lastMessageAt > 0, 'any hub message refreshes lastMessageAt');
+  assert.ok(hub.status().ageMs >= 0, 'ageMs counts from the last message');
   await hub.stop();
 });
 

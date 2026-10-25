@@ -51,7 +51,7 @@ export class UserStream extends EventEmitter {
         GatewayUserPosition: (...a) => unwrap(a).forEach((x) => this.onPosition(x)),
         GatewayUserTrade: (...a) => unwrap(a).forEach((x) => this.onTrade(x)),
       },
-      onReady: (hub) => this.subscribe(hub),
+      onReady: (hub) => this.onHubReady(hub),
       onState: (state, info) => this.emit('state', state, info),
     });
   }
@@ -93,6 +93,20 @@ export class UserStream extends EventEmitter {
 
   get accountId() {
     return this.account?.id ?? null;
+  }
+
+  /**
+   * Runs on every hub connect, including rebuilds and SignalR reconnects. Events
+   * sent while the socket was down are gone for good, so the REST state replaces
+   * whatever the hub missed. A failed reconcile must not fail the resubscribe.
+   */
+  async onHubReady(hub) {
+    await this.subscribe(hub);
+    try {
+      await this.reconcile();
+    } catch (err) {
+      console.warn(`[user-hub] reconcile after connect failed: ${err.message}`);
+    }
   }
 
   async subscribe(hub) {
@@ -258,6 +272,7 @@ export class UserStream extends EventEmitter {
       positions: this.positions.size,
       openOrders: this.openOrders().length,
       lastReconcileAt: this.lastReconcileAt || null,
+      reconcileAgeMs: this.lastReconcileAt ? Date.now() - this.lastReconcileAt : null,
     };
   }
 

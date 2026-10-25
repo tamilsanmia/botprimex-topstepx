@@ -24,6 +24,7 @@ import { UserStream } from './userStream.js';
 const GUARD_THROTTLE_MS = 200;
 const HISTORY_DAYS = 90;
 const PROTECT_INTERVAL_MS = 2000;
+const STALE_NOTIFY_MIN_MS = 60_000;
 const STOP_MODES = ['gateway', 'native', 'off'];
 const SNAPSHOT_LIMITS = Object.freeze({ positions: 100, closedResults: 5000, pairLength: 40 });
 
@@ -40,6 +41,15 @@ export function assertStartable(cfg) {
     if (!STOP_MODES.includes(ps.mode)) problems.push(`protective_stop.mode must be one of ${STOP_MODES.join(', ')}, got ${JSON.stringify(ps.mode)}`);
     if (!(Number(ps.grace_secs) >= 0)) problems.push('protective_stop.grace_secs must be >= 0');
     if (!(Number(ps.flatten_after_secs) > Number(ps.grace_secs))) problems.push('protective_stop.flatten_after_secs must be greater than grace_secs');
+    if (problems.length) throw new StartupError(`Invalid projectx_gateway config: ${problems.join('; ')}`);
+  }
+  const stale = cfg.gateway?.stale;
+  if (stale) {
+    const block = Number(stale.block_entries_secs);
+    const flatten = Number(stale.flatten_secs);
+    const problems = [];
+    if (!(block > 0)) problems.push('stale.block_entries_secs must be greater than 0');
+    if (!(flatten === 0 || flatten >= block)) problems.push('stale.flatten_secs must be 0 (never flatten) or at least block_entries_secs');
     if (problems.length) throw new StartupError(`Invalid projectx_gateway config: ${problems.join('; ')}`);
   }
   if (cfg.mock && cfg.dryRun === false) {
@@ -325,6 +335,7 @@ export class GatewayApp {
       resolved,
       lots: new LotTable(resolved.lots),
       statePath: path.join(cfg.dataDir, `topstep_state.${stateName}.json`),
+      stale: cfg.gateway.stale,
     });
     if (this.guardSource === 'projectx') {
       this.guard.rebuildHistory([...this.user.trades.values()], this.user.account.balance);
@@ -372,11 +383,12 @@ export class GatewayApp {
         unrealized: this.router_.unrealized(),
         ...summarizeFills([...this.user.trades.values()], this.guard.clock.sessionStart(now)),
         legs: this.router_.legs({ reserved: false }),
+        dataHealth: this.dataHealth(now),
       };
     }
     const s = this.snapshot;
     if (!s) {
-      return { now, balance: this.guard.start, unrealized: 0, dayRealized: 0, closedResults: [], entriesToday: 0, legs: [] };
+      return { now, balance: this.guard.start, unrealized: 0, dayRealized: 0, closedResults: [], entriesToday: 0, legs: [], dataHealth: this.dataHealth(now) };
     }
     let unrealized = 0;
     const legs = [];
@@ -397,7 +409,49 @@ export class GatewayApp {
       closedResults: s.closed_results || [],
       entriesToday: Number(s.entries_today) || 0,
       legs,
+      dataHealth: this.dataHealth(now),
     };
+  }
+
+  /**
+   * What is wrong with the data the guard relies on, as { ok, reasons }. Each
+   * reason has a code (market_hub_down, user_hub_down, quote_stale,
+   * reconcile_stale), `since` (local ms when the data was last good) and ageSecs,
+   * and appears once it is block_entries_secs old. The guard turns reasons into
+   * blocked entries and, for open positions, a flatten (see AccountGuard.staleness).
+   */
+  dataHealth(now = Date.now()) {
+    const stale = this.cfg.gateway.stale;
+    const blockMs = Number(stale.block_entries_secs) * 1000;
+    const reasons = [];
+    const add = (code, since, extra = {}, minMs = blockMs) => {
+      if (!since || now - since < minMs) return;
+      reasons.push({ code, ...extra, since, ageSecs: Math.round((now - since) / 1000) });
+    };
+
+    if (this.market) {
+      if (this.market.hub.state !== 'connected') add('market_hub_down', this.market.hub.stateAt);
+      for (const root of this.market.wantedRoots()) add('quote_stale', this.market.quoteSince(root), { root });
+    }
+    if (this.user && this.guardSource === 'projectx' && !this.cfg.dataOnly) {
+      if (this.user.hub.state !== 'connected') add('user_hub_down', this.user.hub.stateAt);
+      // The REST reconcile runs every reconcile_secs; missing several in a row means REST is failing.
+      add('reconcile_stale', this.user.lastReconcileAt, {}, Math.max(blockMs, 3 * Number(this.cfg.gateway.reconcile_secs) * 1000));
+    }
+    return { ok: reasons.length === 0, reasons };
+  }
+
+  /** Tells the operator once when data goes stale and once when it recovers (at most one message a minute). */
+  noticeDataHealth(verdict, now = Date.now()) {
+    if (this.cfg.gateway.stale.notify === false) return;
+    const stale = verdict.reasons.some((r) => r.code === 'data_stale');
+    if (stale === Boolean(this.staleNotified) || now - (this.staleNotifyAt || 0) < STALE_NOTIFY_MIN_MS) return;
+    this.staleNotified = stale;
+    this.staleNotifyAt = now;
+    const detail = verdict.reasons.find((r) => r.code === 'data_stale')?.detail;
+    this.notify(stale
+      ? `market or account data is stale, entries are blocked${verdict.flattenReasons.includes('data_stale') ? ' and open positions are being flattened' : ''}: ${detail}`
+      : 'market and account data are fresh again, entries are allowed');
   }
 
   evaluateGuard() {
@@ -405,6 +459,7 @@ export class GatewayApp {
     const input = this.guardInputs();
     if (!input) return null;
     const verdict = this.guard.evaluate(input);
+    this.noticeDataHealth(verdict, input.now);
     if (this.guardSource === 'projectx') {
       this.router_.enforceFlatten(verdict).catch((err) => console.warn(`[gateway] flatten fallback failed: ${err.message}`));
     }
@@ -428,7 +483,17 @@ export class GatewayApp {
   /* ---------------------------------------------------------- API handlers -- */
 
   health() {
-    return { ok: true, ready: this.ready, mock: this.cfg.mock, marketHub: this.market?.hub.state ?? 'idle', startError: this.ready ? null : this.startError };
+    return {
+      ok: true,
+      ready: this.ready,
+      mock: this.cfg.mock,
+      marketHub: this.market?.hub.state ?? 'idle',
+      marketHubAgeMs: this.market?.hub.status().ageMs ?? null,
+      userHub: this.user?.hub.state ?? 'idle',
+      userHubAgeMs: this.user?.hub.status().ageMs ?? null,
+      dataHealth: this.ready ? this.dataHealth() : null,
+      startError: this.ready ? null : this.startError,
+    };
   }
 
   status() {

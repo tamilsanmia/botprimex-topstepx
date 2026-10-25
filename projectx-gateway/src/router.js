@@ -116,6 +116,11 @@ export class OrderRouter {
     return null;
   }
 
+  /** Milliseconds since the last market message for the root, null when it is not subscribed. */
+  markAge(root) {
+    return this.market.quoteAgeMs ? this.market.quoteAgeMs(root) : null;
+  }
+
   positionForRoot(root) {
     for (const p of this.user.positions.values()) {
       if (this.contracts.rootForContract(p.contractId) === root) return p;

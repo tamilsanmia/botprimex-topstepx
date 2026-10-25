@@ -403,6 +403,9 @@ export class AccountGuard extends EventEmitter {
     if (!res.canEnter) {
       return { ok: false, reason: `${res.status}: ${res.reasons.map((x) => x.code).join(', ')}`, maxContracts: 0 };
     }
+    if (!this.lots.info(root).known) {
+      return { ok: false, reason: `unknown contract root ${root}: its mini/micro weight is not in the lot table (add it under topstep.lots.overrides)`, maxContracts: 0 };
+    }
     const held = [...new Set(legs.filter((l) => Math.abs(l.contracts) > 0).map((l) => l.root))];
     const conflict = this.lots.overlapConflict(root, held);
     if (conflict) return { ok: false, reason: `mini/micro overlap: ${conflict} is already held in the ${this.lots.info(root).group} group`, maxContracts: 0 };

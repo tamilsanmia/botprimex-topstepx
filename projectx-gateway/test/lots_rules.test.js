@@ -3,7 +3,9 @@ import { test } from 'node:test';
 
 import { parseLenientJson } from '../src/config.js';
 import { estimateExpiry } from '../src/contracts.js';
+import { AccountGuard } from '../src/guard.js';
 import { LotTable } from '../src/lots.js';
+import { createMockUpstream } from '../src/mock.js';
 import { accountProduct, contractMonth, contractRoot } from '../src/projectx.js';
 import { RulesError, maxMiniEquivalent, resolveRules } from '../src/rules.js';
 
@@ -107,4 +109,46 @@ test('rules: invalid config fails fast with every problem listed', () => {
 test('config parser accepts comments and trailing commas like Freqtrade', () => {
   const cfg = parseLenientJson('{\n // c\n "a": "http://x//y", /* b */ "b": [1, 2,],\n}');
   assert.deepEqual(cfg, { a: 'http://x//y', b: [1, 2] });
+});
+
+test('an unknown root is not guessed: weight 1, known false, and the old M-prefix rule is gone', () => {
+  const lots = new LotTable();
+  for (const root of ['MXYZ', 'FOO', 'MM', 'XX']) {
+    const info = lots.info(root);
+    assert.equal(info.known, false, root);
+    assert.equal(info.weight, 1, root);
+    assert.equal(info.class, 'mini', root);
+  }
+  assert.equal(lots.info('mes').known, true, 'lookups are case-insensitive');
+  assert.equal(lots.exposure([{ root: 'MXYZ', contracts: 3 }]), 3, 'an unknown micro-looking root counts as full minis');
+  assert.equal(lots.contractsThatFit('MXYZ', 5, []), 5);
+});
+
+test('an override makes an unknown root known; an empty override does not', () => {
+  const lots = new LotTable({ overrides: { MXYZ: { class: 'micro' }, WGT: { weight: 0.5 }, EMPTY: {} } });
+  assert.deepEqual([lots.info('MXYZ').known, lots.info('MXYZ').weight], [true, 0.1]);
+  assert.deepEqual([lots.info('WGT').known, lots.info('WGT').weight], [true, 0.5]);
+  assert.equal(lots.info('EMPTY').known, false);
+});
+
+test('every root the mock exchange offers is in the lot table', async () => {
+  const lots = new LotTable();
+  const contracts = await createMockUpstream({}).client.availableContracts();
+  assert.ok(contracts.length >= 14);
+  for (const c of contracts) assert.equal(lots.info(c.root).known, true, `${c.root} is missing from BUILTIN`);
+});
+
+test('AccountGuard.canEnter refuses an unknown root with a clear reason, and accepts it once overridden', () => {
+  const make = (overrides = {}) => {
+    const resolved = resolveRules({ phase: 'evaluation', preset: '50k', session: { trade_weekends: true, hold_mode: 'overnight', no_entry_before: '00:00', no_entry_after: '00:00' } }, null);
+    const guard = new AccountGuard({ resolved, lots: new LotTable({ overrides }), statePath: null });
+    guard.evaluate({ balance: 50000, unrealized: 0, dayRealized: 0, closedResults: [], entriesToday: 0, legs: [] });
+    return guard;
+  };
+  const refused = make().canEnter({ root: 'MXYZ', contracts: 1, legs: [] });
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /unknown contract root MXYZ/);
+  assert.equal(refused.maxContracts, 0);
+  assert.equal(make().canEnter({ root: 'MES', contracts: 1, legs: [] }).ok, true);
+  assert.equal(make({ MXYZ: { class: 'micro' } }).canEnter({ root: 'MXYZ', contracts: 1, legs: [] }).ok, true);
 });

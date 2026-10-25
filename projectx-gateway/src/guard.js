@@ -14,6 +14,7 @@ export const STATUS = Object.freeze({
 
 const RANK = { active: 0, entries_blocked: 1, day_locked: 2, account_locked: 3 };
 
+const PERSIST_DEBOUNCE_MS = 1000;
 const STALE_DEFAULTS = Object.freeze({ block_entries_secs: 15, flatten_secs: 120 });
 
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : v);
@@ -70,10 +71,13 @@ export function summarizeFills(trades, dayStart) {
  * the order router (entries refused) and the flatten fallback.
  */
 export class AccountGuard extends EventEmitter {
-  constructor({ resolved, lots, statePath, now = () => Date.now(), stale = {} }) {
+  constructor({ resolved, lots, statePath, now = () => Date.now(), stale = {}, persistDebounceMs = PERSIST_DEBOUNCE_MS }) {
     super();
     this.resolved = resolved;
     this.stale = { ...STALE_DEFAULTS, ...stale };
+    this.persistDebounceMs = persistDebounceMs;
+    this.persistTimer = null;
+    this.persistPending = false;
     this.rules = resolved.rules;
     this.session = resolved.session;
     this.protection = resolved.protection;
@@ -111,12 +115,39 @@ export class AccountGuard extends EventEmitter {
     }
   }
 
+  /** Writes the state to disk now (atomic tmp + rename). Locks, day rollover and EOD snapshots use this. */
   persist() {
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
+    this.persistPending = false;
     if (!this.statePath) return;
     mkdirSync(path.dirname(this.statePath), { recursive: true });
     const tmp = `${this.statePath}.tmp`;
     writeFileSync(tmp, JSON.stringify(this.state, null, 2));
     renameSync(tmp, this.statePath);
+  }
+
+  /**
+   * Persists a change that can wait: a new day peak or intraday high-water mark
+   * moves on nearly every tick while a position is open, and writing the file each
+   * time blocks the event loop. The write happens at most persistDebounceMs later.
+   * Losing it in a crash costs at most that second of peak, never a lock.
+   */
+  persistLater() {
+    this.persistPending = true;
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      if (this.persistPending) this.persist();
+    }, this.persistDebounceMs);
+    this.persistTimer.unref?.();
+  }
+
+  /** Writes any debounced change now. Call on shutdown. */
+  flush() {
+    if (this.persistPending) this.persist();
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
   }
 
   /**
@@ -242,7 +273,8 @@ export class AccountGuard extends EventEmitter {
     const unrealized = Number(input.unrealized) || 0;
     const dayRealized = Number(input.dayRealized) || 0;
     const equity = balance + unrealized;
-    let dirty = false;
+    let dirty = false; // changes that must reach disk before evaluate() returns
+    let minorDirty = false; // high-water marks, which may be written a moment later
 
     // A new trading day began. If the previous one was never snapshotted (the
     // gateway was not running at its EOD), close it from what is known now.
@@ -271,7 +303,7 @@ export class AccountGuard extends EventEmitter {
     const dayPnl = dayRealized + (r.daily_loss_type === 'intraday' ? unrealized : 0);
     if (dayPnl > s.dayPeakPnl) {
       s.dayPeakPnl = dayPnl;
-      dirty = true;
+      minorDirty = true;
     }
     const dayLoss = Math.max(0, -dayPnl);
     const totalProfit = balance - this.start;
@@ -282,7 +314,7 @@ export class AccountGuard extends EventEmitter {
       const next = Math.max(s.hwmIntraday ?? this.start, this.start, equity);
       if (next !== s.hwmIntraday) {
         s.hwmIntraday = next;
-        dirty = true;
+        minorDirty = true;
       }
       hwm = next;
     } else if (r.max_loss_type === 'trailing_eod') {
@@ -405,6 +437,7 @@ export class AccountGuard extends EventEmitter {
     };
 
     if (dirty) this.persist();
+    else if (minorDirty) this.persistLater();
     this.last = result;
 
     const signature = `${status}|${reasons.map((x) => x.code).join(',')}|${flattenReasons.join(',')}`;

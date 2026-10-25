@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { gunzipSync, gzipSync } from 'node:zlib';
+import { pipeline } from 'node:stream/promises';
+import { createGzip, gunzipSync } from 'node:zlib';
 import os from 'node:os';
 
 import Database from 'better-sqlite3';
@@ -9,6 +10,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const FLUSH_MS = 500;
 const COMPRESS_AFTER_DAYS = 2;
 const OPEN_CACHE = 4;
+// Rows written per event-loop turn by flushAsync, so a burst never stalls the loop for long.
+const FLUSH_CHUNK = 2000;
+// Per root: how many recent distinct millisecond timestamps keep their print counter.
+const SEQ_WINDOW = 512;
 
 const utcDay = (ts) => new Date(ts).toISOString().slice(0, 10);
 const tableName = (prefix, root) => `${prefix}_${String(root).replace(/[^A-Z0-9]/gi, '_').toUpperCase()}`;
@@ -32,13 +37,16 @@ export class TickStore {
     this.open = new Map();
     this.pending = [];
     this.pendingQuotes = [];
-    this.seqByMs = new Map();
+    this.seqByRoot = new Map();
+    this.flushing = null;
+    this.maintaining = null;
+    this.closed = false;
     this.lastQuoteSec = new Map();
     this.stats = { written: 0, lastFlushMs: 0 };
     if (enabled) mkdirSync(dir, { recursive: true });
-    this.timer = setInterval(() => this.flush(), FLUSH_MS);
+    this.timer = setInterval(() => this.flushAsync().catch((err) => console.warn(`[ticks] flush failed: ${err.message}`)), FLUSH_MS);
     this.timer.unref?.();
-    this.maintenance = setInterval(() => this.maintain(), 60 * 60 * 1000);
+    this.maintenance = setInterval(() => this.maintain().catch((err) => console.warn(`[ticks] maintenance failed: ${err.message}`)), 60 * 60 * 1000);
     this.maintenance.unref?.();
   }
 
@@ -101,12 +109,35 @@ export class TickStore {
     return db;
   }
 
+  /**
+   * Sequence number of a print within its millisecond. Prints of one root arrive
+   * almost in order, so a counter per recent timestamp is enough, and unlike a
+   * global map that gets cleared when it fills up it never forgets a millisecond
+   * that is still receiving prints. (ts, seq) is the primary key, so a repeated seq
+   * would silently drop the print.
+   */
+  nextSeq(root, ts) {
+    let counters = this.seqByRoot.get(root);
+    if (!counters) {
+      counters = new Map();
+      this.seqByRoot.set(root, counters);
+    }
+    const seq = counters.get(ts) ?? 0;
+    // Re-insert so the Map's order is "least recently seen first".
+    counters.delete(ts);
+    counters.set(ts, seq + 1);
+    if (counters.size > SEQ_WINDOW * 2) {
+      for (const key of counters.keys()) {
+        if (counters.size <= SEQ_WINDOW) break;
+        counters.delete(key);
+      }
+    }
+    return seq;
+  }
+
   record(root, tick) {
     if (!this.enabled) return;
-    const key = `${root}|${tick.ts}`;
-    const seq = this.seqByMs.get(key) || 0;
-    this.seqByMs.set(key, seq + 1);
-    if (this.seqByMs.size > 50_000) this.seqByMs.clear();
+    const seq = this.nextSeq(root, tick.ts);
     this.pending.push([root, tick.ts, seq, tick.price, tick.size, tick.side === 'buy' ? 0 : 1]);
   }
 
@@ -118,13 +149,39 @@ export class TickStore {
     this.pendingQuotes.push([root, sec * 1000, bid, ask]);
   }
 
+  /** Writes everything pending now. Used by reads (so they see fresh rows) and at close. */
   flush() {
     if (!this.pending.length && !this.pendingQuotes.length) return;
-    const started = performance.now();
     const ticks = this.pending;
     const quotes = this.pendingQuotes;
     this.pending = [];
     this.pendingQuotes = [];
+    this.writeRows(ticks, quotes);
+  }
+
+  /**
+   * The timer's flush: writes at most FLUSH_CHUNK rows per event-loop turn. Rows
+   * not yet written stay in `pending`, so a read that calls flush() meanwhile still
+   * sees and writes them. Calls while a flush is running join it.
+   */
+  flushAsync() {
+    if (this.flushing) return this.flushing;
+    this.flushing = (async () => {
+      try {
+        while (!this.closed && (this.pending.length || this.pendingQuotes.length)) {
+          this.writeRows(this.pending.splice(0, FLUSH_CHUNK), this.pendingQuotes.splice(0, FLUSH_CHUNK));
+          if (this.pending.length || this.pendingQuotes.length) await new Promise((resolve) => setImmediate(resolve));
+        }
+      } finally {
+        this.flushing = null;
+      }
+    })();
+    return this.flushing;
+  }
+
+  writeRows(ticks, quotes) {
+    if (!ticks.length && !quotes.length) return;
+    const started = performance.now();
 
     const byDay = new Map();
     for (const row of ticks) {
@@ -217,8 +274,20 @@ export class TickStore {
     }));
   }
 
-  /** Compress old days and drop expired ones. */
+  /**
+   * Compress old days and drop expired ones. The gzip runs as a stream on the
+   * thread pool, so a day file of hundreds of MB does not block the event loop.
+   * Calls while a run is in progress join it.
+   */
   maintain(now = Date.now()) {
+    if (this.maintaining) return this.maintaining;
+    this.maintaining = this.runMaintenance(now).finally(() => {
+      this.maintaining = null;
+    });
+    return this.maintaining;
+  }
+
+  async runMaintenance(now) {
     if (!this.enabled || !existsSync(this.dir)) return;
     const today = utcDay(now);
     for (const file of readdirSync(this.dir)) {
@@ -232,17 +301,36 @@ export class TickStore {
         continue;
       }
       if (!match[2] && ageDays >= COMPRESS_AFTER_DAYS && statSync(full).size > 0) {
-        const entry = this.open.get(day);
-        const db = entry?.db || new Database(full);
-        db.pragma('wal_checkpoint(TRUNCATE)');
-        db.close();
-        this.open.delete(day);
-        writeFileSync(`${full}.gz`, gzipSync(readFileSync(full)));
-        rmSync(full, { force: true });
-        rmSync(`${full}-wal`, { force: true });
-        rmSync(`${full}-shm`, { force: true });
+        await this.compressDay(day, full);
       }
     }
+  }
+
+  async compressDay(day, full) {
+    const entry = this.open.get(day);
+    const db = entry?.db || new Database(full);
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.close();
+    this.open.delete(day);
+
+    // Written under a temporary name and renamed, so a crash never leaves a truncated .gz that looks valid.
+    const gz = `${full}.gz`;
+    const partial = `${gz}.partial`;
+    try {
+      await pipeline(createReadStream(full), createGzip(), createWriteStream(partial));
+    } catch (err) {
+      rmSync(partial, { force: true });
+      throw err;
+    }
+    if (this.open.has(day)) {
+      // A late print reopened the day while it was being compressed; keep the live file and try again next run.
+      rmSync(partial, { force: true });
+      return;
+    }
+    renameSync(partial, gz);
+    rmSync(full, { force: true });
+    rmSync(`${full}-wal`, { force: true });
+    rmSync(`${full}-shm`, { force: true });
   }
 
   status() {
@@ -250,6 +338,7 @@ export class TickStore {
   }
 
   close() {
+    this.closed = true;
     clearInterval(this.timer);
     clearInterval(this.maintenance);
     this.flush();

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -8,6 +8,7 @@ import { AccountGuard, STATUS, summarizeFills } from '../src/guard.js';
 import { LotTable } from '../src/lots.js';
 import { resolveRules } from '../src/rules.js';
 import { zonedToUtc } from '../src/session.js';
+import { sleep } from './helpers.js';
 
 const TZ = 'America/New_York';
 // Tuesday 20 Oct 2026; Saturday is the 24th.
@@ -191,4 +192,140 @@ test('canEnter enforces the cap and the overlap rule', () => {
   assert.equal(cap.ok, false);
   assert.equal(cap.maxContracts, 30);
   assert.equal(g.canEnter({ root: 'MNQ', contracts: 30, legs: [{ root: 'ES', contracts: 2 }] }).ok, true);
+});
+
+/* ------------------------------------------------------ debounced persistence -- */
+
+function persistGuard(topstep = {}, persistDebounceMs = 40) {
+  const resolved = resolveRules({
+    phase: 'auto', preset: 'auto',
+    protection: { daily_profit_lock: { enabled: false } },
+    ...topstep,
+    session: { news_blackout: [], ...(topstep.session || {}) },
+  }, { name: '50KTC-V2-1', kind: 'TC', sizeUsd: 50000 });
+  const statePath = path.join(mkdtempSync(path.join(os.tmpdir(), 'guard-')), 'state.json');
+  const guard = new AccountGuard({ resolved, lots: new LotTable(resolved.lots), statePath, persistDebounceMs });
+  const onDisk = () => (existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : null);
+  return { guard, statePath, onDisk };
+}
+
+test('a new day peak is written a moment later, not on the tick that set it', async () => {
+  const { guard, onDisk } = persistGuard();
+  // First evaluation of the day rolls the day over, which is critical and written at once.
+  guard.evaluate({ ...base, now: et(20, 10) });
+  assert.equal(onDisk().dayPeakPnl, 0);
+
+  guard.evaluate({ ...base, now: et(20, 10, 1), unrealized: 400 });
+  assert.equal(guard.state.dayPeakPnl, 400);
+  assert.equal(onDisk().dayPeakPnl, 0, 'the peak is still only in memory');
+  assert.ok(guard.persistTimer, 'a write is scheduled');
+
+  await sleep(80);
+  assert.equal(onDisk().dayPeakPnl, 400, 'and it lands after the debounce');
+  assert.equal(guard.persistTimer, null);
+  assert.equal(guard.persistPending, false);
+});
+
+test('many peak updates inside the window cause one write with the latest value', async () => {
+  const { guard, onDisk } = persistGuard();
+  guard.evaluate({ ...base, now: et(20, 10) });
+  let writes = 0;
+  const persist = guard.persist.bind(guard);
+  guard.persist = () => { writes += 1; persist(); };
+  for (let i = 1; i <= 50; i += 1) guard.evaluate({ ...base, now: et(20, 10, 1) + i, unrealized: 10 * i });
+  assert.equal(writes, 0);
+  await sleep(80);
+  assert.equal(writes, 1);
+  assert.equal(onDisk().dayPeakPnl, 500);
+});
+
+test('an intraday high-water mark is debounced the same way', async () => {
+  const { guard, onDisk } = persistGuard({ phases: { evaluation: { max_loss_type: 'trailing_intraday', consistency_pct: null } } });
+  guard.evaluate({ ...base, now: et(20, 10) });
+  guard.evaluate({ ...base, now: et(20, 10, 1), unrealized: 700 });
+  assert.equal(guard.state.hwmIntraday, 50700);
+  assert.notEqual(onDisk().hwmIntraday, 50700);
+  await sleep(80);
+  assert.equal(onDisk().hwmIntraday, 50700);
+});
+
+test('locks persist immediately, together with any pending peak', () => {
+  const { guard, onDisk } = persistGuard();
+  guard.evaluate({ ...base, now: et(20, 10) });
+  guard.evaluate({ ...base, now: et(20, 10, 1), unrealized: 300 });
+  assert.equal(onDisk().dayPeakPnl, 0);
+
+  const hard = guard.evaluate({ ...base, now: et(20, 10, 2), balance: 49100, dayRealized: -900, unrealized: 0 });
+  assert.equal(hard.status, STATUS.DAY_LOCKED);
+  const disk = onDisk();
+  assert.equal(disk.dayLock.reason, 'dll_hard', 'the lock is on disk before evaluate() returned');
+  assert.equal(disk.dayPeakPnl, 300, 'the whole state is written, so the pending peak went along');
+  assert.equal(guard.persistTimer, null, 'and the scheduled write was cancelled');
+});
+
+test('an account lock persists immediately', () => {
+  const { guard, onDisk } = persistGuard();
+  guard.evaluate({ ...base, now: et(20, 10) });
+  const res = guard.evaluate({ ...base, now: et(20, 10, 1), balance: 48200 });
+  assert.equal(res.status, STATUS.ACCOUNT_LOCKED);
+  assert.equal(onDisk().accountLock.reason, 'mll_buffer');
+});
+
+test('day rollover and the EOD snapshot persist immediately', () => {
+  const { guard, onDisk } = persistGuard();
+  guard.evaluate({ ...base, now: et(20, 12) });
+  assert.equal(onDisk().dayKey, '2026-10-20');
+  guard.evaluate({ ...base, now: et(20, 16, 11), balance: 50500, dayRealized: 500 });
+  assert.equal(onDisk().lastEodKey, '2026-10-20');
+  assert.equal(onDisk().hwmEod, 50500);
+  guard.evaluate({ ...base, now: et(21, 10), balance: 50500 });
+  assert.equal(onDisk().dayKey, '2026-10-21');
+});
+
+test('reset() and rebuildHistory() persist immediately', () => {
+  const { guard, onDisk } = persistGuard();
+  guard.evaluate({ ...base, now: et(20, 10) });
+  guard.evaluate({ ...base, now: et(20, 10, 2), balance: 49100, dayRealized: -900 });
+  assert.ok(onDisk().dayLock);
+  guard.reset('day');
+  assert.equal(onDisk().dayLock, null);
+
+  const fill = { creationTimestamp: new Date(et(19, 10)).toISOString(), profitAndLoss: 600, fees: 1, commissions: 0, orderId: 1 };
+  guard.rebuildHistory([fill], 50599, et(21, 10));
+  assert.ok(onDisk().days['2026-10-19']);
+});
+
+test('flush() writes a pending peak at once and cancels the timer', async () => {
+  const { guard, onDisk } = persistGuard({}, 60_000);
+  guard.evaluate({ ...base, now: et(20, 10) });
+  guard.evaluate({ ...base, now: et(20, 10, 1), unrealized: 250 });
+  assert.equal(onDisk().dayPeakPnl, 0);
+  guard.flush();
+  assert.equal(onDisk().dayPeakPnl, 250);
+  assert.equal(guard.persistTimer, null);
+  assert.equal(guard.persistPending, false);
+});
+
+test('flush() with nothing pending writes nothing', () => {
+  const { guard, statePath } = persistGuard({}, 60_000);
+  guard.flush();
+  assert.equal(existsSync(statePath), false);
+  guard.evaluate({ ...base, now: et(20, 10) });
+  rmSync(statePath);
+  guard.flush();
+  assert.equal(existsSync(statePath), false, 'a clean state is not rewritten');
+});
+
+test('a restart after flush() sees the peak, so profit giveback still works', () => {
+  const lock = { protection: { daily_profit_lock: { enabled: true, activate_at: 800, giveback_pct: 40 } } };
+  const first = persistGuard(lock, 60_000);
+  first.guard.evaluate({ ...base, now: et(20, 10) });
+  first.guard.evaluate({ ...base, now: et(20, 10, 1), unrealized: 1000 });
+  first.guard.flush();
+
+  const resolved = resolveRules({ phase: 'auto', preset: 'auto', ...lock, session: { news_blackout: [] } }, { name: '50KTC-V2-1', kind: 'TC', sizeUsd: 50000 });
+  const second = new AccountGuard({ resolved, lots: new LotTable(resolved.lots), statePath: first.statePath });
+  assert.equal(second.state.dayPeakPnl, 1000);
+  const res = second.evaluate({ ...base, now: et(20, 10, 5), unrealized: 590 });
+  assert.equal(res.status, STATUS.DAY_LOCKED);
 });

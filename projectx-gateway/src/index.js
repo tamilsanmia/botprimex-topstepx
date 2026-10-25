@@ -642,6 +642,7 @@ export class GatewayApp {
     clearInterval(this.protectTimer);
     clearInterval(this.rollTimer);
     await Promise.allSettled([this.market?.stop(), this.user?.stop()]);
+    this.guard?.flush();
     this.store?.close();
     this.ticks?.close();
     this.server?.server.close();

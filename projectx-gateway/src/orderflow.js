@@ -112,15 +112,59 @@ export function computeFeatures({ ticks, tfMs, since, clock, blockMultiple = 25,
   return rows.filter((r) => r.ts >= since).slice(-MAX_FEATURE_CANDLES);
 }
 
+/**
+ * Order flow features per (root, timeframe, from). Freqtrade asks for the same
+ * window on every bot loop and for every pair, and each answer replays a session of
+ * ticks, which blocks the event loop for as long as the session is big. Answers are
+ * therefore kept for `ttlMs`, keyed by the candle the request falls in: within one
+ * candle and the TTL a repeated request costs a map lookup, and a new candle or an
+ * expired entry recomputes. A cached answer can lag the live candle by up to ttlMs.
+ *
+ * The computation is synchronous, so two requests can never be in flight at once;
+ * there is nothing to coalesce beyond the cache itself.
+ */
 export class OrderflowService {
-  constructor({ tickStore, clock, blockMultiple = 25, valueAreaPct = 70 }) {
+  constructor({ tickStore, clock, blockMultiple = 25, valueAreaPct = 70, ttlMs = 5000, maxEntries = 64, now = () => Date.now() }) {
     this.tickStore = tickStore;
     this.clock = clock;
     this.blockMultiple = blockMultiple;
     this.valueAreaPct = valueAreaPct;
+    this.ttlMs = ttlMs;
+    this.maxEntries = maxEntries;
+    this.now = now;
+    this.cache = new Map();
+    this.stats = { hits: 0, misses: 0 };
   }
 
-  features(root, tf, since, until = Date.now()) {
+  features(root, tf, since, until) {
+    // A caller that names `until` asks about a fixed moment, which a cache keyed on "now" must not answer.
+    if (until !== undefined) return this.compute(root, tf, since, until);
+
+    const now = this.now();
+    const tfMs = timeframe(tf).ms;
+    // `since` is part of the key as given: rows before it are cut off, so a mid-candle value must not share an answer.
+    const key = `${root}|${tf}|${since ?? 'default'}|${bucketStart(now, tfMs)}`;
+    const hit = this.cache.get(key);
+    if (hit && now - hit.at < this.ttlMs) {
+      this.stats.hits += 1;
+      return hit.rows;
+    }
+    this.stats.misses += 1;
+    const rows = this.compute(root, tf, since, now);
+    this.cache.delete(key);
+    this.cache.set(key, { at: now, rows });
+    this.evict(now);
+    return rows;
+  }
+
+  evict(now) {
+    for (const [key, entry] of this.cache) {
+      if (this.cache.size <= this.maxEntries && now - entry.at < this.ttlMs) break;
+      this.cache.delete(key);
+    }
+  }
+
+  compute(root, tf, since, until = Date.now()) {
     const tfMs = timeframe(tf).ms;
     const from = since ?? until - 500 * tfMs;
     const ticks = this.tickStore.ticks(root, this.clock.sessionStart(from), until);

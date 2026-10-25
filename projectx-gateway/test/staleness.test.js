@@ -362,3 +362,16 @@ test('a failing rebuild after a roll is logged, not thrown', async (t) => {
   await app.checkRolls();
   assert.match(warn.mock.calls[0].arguments[0], /candle rebuild after MES roll failed: upstream down/);
 });
+
+/* --------------------------------------------------------------- shutdown -- */
+
+test('stop() writes the guard state that was still waiting for its debounce', async () => {
+  const flushed = [];
+  const app = Object.create(GatewayApp.prototype);
+  app.guard = { flush: () => flushed.push('guard') };
+  app.store = { close: () => flushed.push('store') };
+  app.ticks = { close: () => flushed.push('ticks') };
+  await app.stop();
+  await app.stop();
+  assert.deepEqual(flushed, ['guard', 'store', 'ticks'], 'once, and before the stores close');
+});

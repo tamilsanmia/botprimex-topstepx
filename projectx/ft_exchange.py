@@ -63,6 +63,9 @@ class Projectx(Exchange):
 
     def __init__(self, config, *args, **kwargs) -> None:
         # Refuse placeholder API credentials before anything connects (trade and webserver only).
+        # close() runs from __del__ even for an object that never finished __init__.
+        self._exchange_ws = None
+        self._ws_async = None
         check_startup(config)
         super().__init__(config, *args, **kwargs)
         # Freqtrade caches entry/exit rates for 5 minutes; prices here come from a

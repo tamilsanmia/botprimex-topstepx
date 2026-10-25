@@ -21,6 +21,7 @@ from freqtrade.exchange.exchange import Exchange
 from freqtrade.util import FtTTLCache
 
 from .costs import cost_ratio, costs_config
+from .startup_checks import check_startup
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,10 @@ class Projectx(Exchange):
         (TradingMode.FUTURES, MarginMode.ISOLATED),
     ]
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, config, *args, **kwargs) -> None:
+        # Refuse placeholder API credentials before anything connects (trade and webserver only).
+        check_startup(config)
+        super().__init__(config, *args, **kwargs)
         # Freqtrade caches entry/exit rates for 5 minutes; prices here come from a
         # live tick stream at no request cost, so a 1 second cache is enough.
         self._entry_rate_cache = FtTTLCache(maxsize=100, ttl=RATE_CACHE_TTL_SECS)

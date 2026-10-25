@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { earlyCloseTimes, holidayFor } from './holidays.js';
+import { ORDER_SIDE } from './projectx.js';
 import { maxMiniEquivalent } from './rules.js';
 import { SessionClock, inWindow, parseDays, parseHHMM } from './session.js';
 
@@ -43,25 +44,60 @@ export function fillNet(t) {
   return gross - (Number(t.fees) || 0) - (Number(t.commissions) || 0);
 }
 
-/** Today's realized P&L, closed results in order, and entries, from raw fills. */
+/**
+ * Today's realized P&L, closed results in order, and entries, from raw fills.
+ *
+ * A closed result is a round trip: the net of every fill of one contract from flat
+ * back to flat, so scaling in or out of a position is one result, like a closed
+ * Freqtrade trade. A fill that flips the position closes the old trip and opens a
+ * new one (its fees are split by size). Position state is tracked over all fills, so
+ * a trip opened before dayStart counts on the day it closes. A fill without a usable
+ * side or size cannot be tracked: it counts in dayRealized, and as its own result
+ * when it carries P&L.
+ */
 export function summarizeFills(trades, dayStart) {
-  const today = trades
-    .filter((t) => !t.voided && Date.parse(t.creationTimestamp) >= dayStart)
-    .sort((a, b) => Date.parse(a.creationTimestamp) - Date.parse(b.creationTimestamp));
+  const fills = trades
+    .filter((t) => !t.voided && Number.isFinite(Date.parse(t.creationTimestamp)))
+    .map((t) => ({ t, ts: Date.parse(t.creationTimestamp) }))
+    .sort((a, b) => a.ts - b.ts || (Number(a.t.id) || 0) - (Number(b.t.id) || 0));
 
   let dayRealized = 0;
-  const closes = new Map();
+  const closedResults = [];
   const entries = new Set();
-  for (const t of today) {
-    dayRealized += fillNet(t);
-    if (t.profitAndLoss === null || t.profitAndLoss === undefined) {
-      entries.add(t.orderId ?? t.id);
+  const trips = new Map(); // contractId -> { pos, net } for the round trip in progress
+  for (const { t, ts } of fills) {
+    const today = ts >= dayStart;
+    const net = fillNet(t);
+    const opening = t.profitAndLoss === null || t.profitAndLoss === undefined;
+    if (today) {
+      dayRealized += net;
+      if (opening) entries.add(t.orderId ?? t.id);
+    }
+
+    const size = Number(t.size);
+    const sign = t.side === ORDER_SIDE.BUY ? 1 : t.side === ORDER_SIDE.SELL ? -1 : 0;
+    if (!sign || !(size > 0)) {
+      if (today && !opening) closedResults.push(net);
+      continue;
+    }
+
+    const key = t.contractId ?? '';
+    const trip = trips.get(key) || { pos: 0, net: 0 };
+    const signed = sign * size;
+    const after = trip.pos + signed;
+    if (trip.pos !== 0 && Math.sign(after) !== Math.sign(trip.pos)) {
+      // Back to flat or through it: the part up to flat closes the trip.
+      const closeShare = Math.abs(trip.pos) / size;
+      const gross = opening ? 0 : Number(t.profitAndLoss) || 0;
+      const fees = (Number(t.fees) || 0) + (Number(t.commissions) || 0);
+      const result = trip.net + gross - fees * closeShare;
+      if (today) closedResults.push(result);
+      trips.set(key, after === 0 ? { pos: 0, net: 0 } : { pos: after, net: -fees * (1 - closeShare) });
     } else {
-      const key = t.orderId ?? t.id;
-      closes.set(key, (closes.get(key) || 0) + fillNet(t));
+      trips.set(key, { pos: after, net: trip.net + net });
     }
   }
-  return { dayRealized, closedResults: [...closes.values()], entriesToday: entries.size };
+  return { dayRealized, closedResults, entriesToday: entries.size };
 }
 
 /**

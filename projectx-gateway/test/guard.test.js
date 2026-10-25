@@ -254,6 +254,88 @@ test('summarizeFills nets fees and commissions and counts entries', () => {
   assert.equal(s.dayRealized, 20 - 10 - 3);
 });
 
+// Fills the way the gateway stores them: side 0 buy / 1 sell, P&L only on the closing half-turn.
+function fills(contractId, rows, day = 20) {
+  return rows.map(([hh, mm, side, size, pnl, orderId], i) => ({
+    id: `${contractId}-${hh}${mm}-${i}`,
+    contractId,
+    creationTimestamp: new Date(et(day, hh, mm)).toISOString(),
+    side,
+    size,
+    profitAndLoss: pnl,
+    fees: 0.5,
+    commissions: 0.25,
+    orderId,
+  }));
+}
+const BUY = 0;
+const SELL = 1;
+
+test('summarizeFills: a partial exit round trip is one result', () => {
+  // Buy 3, sell 1 for +30, sell 2 for +50: three fills with P&L on two of them, one trip.
+  const s = summarizeFills(fills('MES', [
+    [9, 0, BUY, 3, null, 1], [10, 0, SELL, 1, 30, 2], [11, 0, SELL, 2, 50, 3],
+  ]), et(19, 18));
+  assert.deepEqual(s.closedResults, [30 + 50 - 3 * 0.75]);
+  assert.equal(s.dayRealized, 30 + 50 - 3 * 0.75);
+  assert.equal(s.entriesToday, 1);
+});
+
+test('summarizeFills: scaling in and out stays one trip; the next trip starts from flat', () => {
+  const s = summarizeFills(fills('MES', [
+    [9, 0, BUY, 1, null, 1], [9, 5, BUY, 1, null, 2], [10, 0, SELL, 1, 20, 3], [10, 5, SELL, 1, -5, 4],
+    [11, 0, SELL, 2, null, 5], [12, 0, BUY, 2, 40, 6],
+  ]), et(19, 18));
+  assert.deepEqual(s.closedResults, [20 - 5 - 4 * 0.75, 40 - 2 * 0.75]);
+  assert.equal(s.entriesToday, 3);
+});
+
+test('summarizeFills: a flip closes the old trip and opens a new one', () => {
+  // Long 2, then sell 3: closes the long (+60) and opens a short 1. The fill fees split 2:1.
+  const rows = [[9, 0, BUY, 2, null, 1], [10, 0, SELL, 3, 60, 2], [11, 0, BUY, 1, -10, 3]];
+  const s = summarizeFills(fills('MES', rows), et(19, 18));
+  const long = -0.75 + (60 - 0.75 * (2 / 3));
+  const short = -0.75 * (1 / 3) + (-10 - 0.75);
+  assert.equal(s.closedResults.length, 2);
+  assert.ok(Math.abs(s.closedResults[0] - long) < 1e-9);
+  assert.ok(Math.abs(s.closedResults[1] - short) < 1e-9);
+  // Every dollar of the fills ends up in exactly one result.
+  assert.ok(Math.abs(s.closedResults.reduce((a, b) => a + b, 0) - s.dayRealized) < 1e-9);
+});
+
+test('summarizeFills: contracts are separate round trips and interleave', () => {
+  const rows = [
+    ...fills('MES', [[9, 0, BUY, 1, null, 1], [11, 0, SELL, 1, 10, 4]]),
+    ...fills('MNQ', [[9, 30, SELL, 2, null, 2], [10, 0, BUY, 1, 5, 3], [10, 30, BUY, 1, 15, 5]]),
+  ];
+  const s = summarizeFills(rows, et(19, 18));
+  // MNQ closes at 10:30, MES at 11:00: results are in the order the trips close.
+  assert.deepEqual(s.closedResults, [5 + 15 - 3 * 0.75, 10 - 2 * 0.75]);
+  assert.equal(s.entriesToday, 2);
+});
+
+test('summarizeFills: a trip opened before the day start closes on the day it ends; voided fills are ignored', () => {
+  const rows = [
+    ...fills('MES', [[9, 0, BUY, 1, null, 1]], 19), // yesterday, before today's 18:00 reset on the 19th
+    ...fills('MES', [[10, 0, SELL, 1, 25, 2]], 20),
+  ];
+  rows.push({ ...rows[1], id: 'void', voided: true, profitAndLoss: 999 });
+  const s = summarizeFills(rows, et(19, 18));
+  assert.deepEqual(s.closedResults, [25 - 0.75 - 0.75], 'the entry fees belong to the trip');
+  assert.equal(s.dayRealized, 25 - 0.75, 'but only today\'s fills count towards today');
+  assert.equal(s.entriesToday, 0);
+});
+
+test('summarizeFills: a fill that cannot be tracked still counts, as its own result when it has P&L', () => {
+  const s = summarizeFills([
+    { id: 1, creationTimestamp: new Date(et(20, 10)).toISOString(), profitAndLoss: 12, fees: 1, commissions: 0, orderId: 9 },
+    { id: 2, creationTimestamp: new Date(et(20, 11)).toISOString(), profitAndLoss: null, fees: 1, commissions: 0, orderId: 10 },
+  ], et(19, 18));
+  assert.deepEqual(s.closedResults, [11]);
+  assert.equal(s.dayRealized, 10);
+  assert.equal(s.entriesToday, 1);
+});
+
 test('canEnter enforces the cap and the overlap rule', () => {
   const g = makeGuard();
   g.evaluate({ ...base, now: et(20, 10) });

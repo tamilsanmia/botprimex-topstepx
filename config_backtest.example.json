@@ -58,6 +58,8 @@
     // No orders go through this gateway, so nothing needs to be reserved for them.
     "rate_limits": { "bars_per_30s": 30, "other_per_60s": 60, "order_reserve": 0, "max_queue": 500 },
     "ticks": { "record": false },
+    // protective_stop, stale and user_retention (see config_projectx.example.json) only matter for a
+    // gateway that trades; this one is data-only (GATEWAY_DATA_ONLY=1), so their defaults are fine.
     // One continuous series per pair across contract rolls. "back" shifts older
     // contracts by the roll gap (no price jumps); "none" keeps raw prices.
     // ProjectX keeps hour/day bars ~1 year, minute bars ~60 days, second bars ~2 weeks.
@@ -137,6 +139,9 @@
     "slippage_ticks": 1
   },
 
+  // 0.0.0.0 is the address inside the container; compose publishes the port on 127.0.0.1 by default.
+  // jwt_secret_key, ws_token and password must be real secrets: the backtest web app refuses to start
+  // while one of them is empty or still contains "change-me".
   "api_server": {
     "enabled": true,
     "listen_ip_address": "0.0.0.0",

@@ -217,6 +217,9 @@
     "reload": true,
     "balance_dust_level": 0.01
   },
+  // 0.0.0.0 is the address inside the container; compose publishes the port on 127.0.0.1 by default.
+  // jwt_secret_key, ws_token and password must be real secrets: the live bot refuses to start
+  // while one of them is empty or still contains "change-me".
   "api_server": {
     "enabled": true,
     "listen_ip_address": "0.0.0.0",

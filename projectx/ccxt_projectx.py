@@ -34,6 +34,23 @@ TIMEFRAMES = [
 
 WS_CANDLE_CACHE = 1000
 
+# The gateway's book is Level 1 with size 0 when the hub has not sent one. ccxt's
+# fetch_l2_order_book drops zero-size levels, which leaves Freqtrade's dry-run with an
+# empty book: market buys then fill at 0, market sells at its 5% worst-case price, and
+# dry-run stops never trigger. An unknown size is reported as deep instead, so dry-run
+# fills at the best bid/ask (costs come from topstep_costs). Live orders never read it.
+UNKNOWN_DEPTH = 1e9
+
+
+def _with_known_depth(book: dict) -> dict:
+    for side in ("bids", "asks"):
+        book[side] = [
+            [price, size if size and size > 0 else UNKNOWN_DEPTH]
+            for price, size, *_ in (book.get(side) or [])
+            if price and price > 0
+        ]
+    return book
+
 
 class _ProjectxBase:
     """Request builders and market parsing shared by the sync and async classes."""
@@ -197,7 +214,7 @@ class projectx(_ProjectxBase, ccxt.Exchange):
         return self.gateway.get("/tickers", {"symbols": self._symbols_param(symbols)})
 
     def fetch_order_book(self, symbol, limit=None, params={}):
-        return self.gateway.get("/orderbook", {"symbol": symbol})
+        return _with_known_depth(self.gateway.get("/orderbook", {"symbol": symbol}))
 
     def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params={}):
         return self.gateway.get("/ohlcv", {"symbol": symbol, "timeframe": timeframe, "since": since, "limit": limit})
@@ -288,7 +305,7 @@ class projectx_async(_ProjectxBase, ccxt_async.Exchange):
         return await self._gw("GET", "/tickers", {"symbols": self._symbols_param(symbols)})
 
     async def fetch_order_book(self, symbol, limit=None, params={}):
-        return await self._gw("GET", "/orderbook", {"symbol": symbol})
+        return _with_known_depth(await self._gw("GET", "/orderbook", {"symbol": symbol}))
 
     async def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params={}):
         return await self._gw("GET", "/ohlcv", {"symbol": symbol, "timeframe": timeframe, "since": since, "limit": limit})

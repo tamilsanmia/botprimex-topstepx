@@ -161,7 +161,8 @@ test('reads give up after the retries and surface RateLimitExceeded', async (t) 
 
 test('a request shed by the gateway limiter is not retried and does not pause the bucket', async (t) => {
   const net = stubFetch(t, (path) => (path === '/api/Auth/loginKey' ? login() : json({})));
-  const limiter = new RateLimiter({ bars_per_30s: 5, other_per_60s: 1, order_reserve: 0, max_queue: 1 });
+  // The login and the first read use the two stamps of the window.
+  const limiter = new RateLimiter({ bars_per_30s: 5, other_per_60s: 2, order_reserve: 0, max_queue: 1 });
   const keepAlive = setInterval(() => {}, 1000);
   try {
     const client = makeClient(limiter);

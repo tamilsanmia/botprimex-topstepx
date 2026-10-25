@@ -191,6 +191,15 @@
     "cvd_divergence_lookback": 20
   },
 
+  // Trading costs per contract and per side, charged in backtest, hyperopt and dry-run. Live trading
+  // ignores this block: its fills carry the real fees. Defaults mirror the mock gateway (mock.js).
+  // The costs are set on each trade's fee_open/fee_close, so Freqtrade's "fee" setting is not needed.
+  "topstep_costs": {
+    "enabled": true,
+    "fee_per_contract": 0.37,
+    "commission_per_contract": 0.25,
+    "slippage_ticks": 1
+  },
   "telegram": {
     "enabled": false,
     "token": "",

@@ -1,16 +1,21 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import os from 'node:os';
 
 import { WebSocketServer } from 'ws';
 
 import { rootOf } from './config.js';
-import { GatewayError, badRequest } from './errors.js';
+import { GatewayError, badRequest, permissionDenied } from './errors.js';
 import { TIMEFRAMES } from './timeframes.js';
 
 const MAX_BODY = 64 * 1024;
 
-function secretOk(expected, given) {
-  if (!expected) return true;
+/**
+ * Fails closed: with no secret configured nothing is authorised, unless the caller
+ * explicitly opted in with `allowOpen` (mock mode only).
+ */
+function secretOk(expected, given, allowOpen = false) {
+  if (!expected) return allowOpen === true;
   const a = Buffer.from(String(given || ''));
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
@@ -19,17 +24,23 @@ function secretOk(expected, given) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let tooLarge = false;
     const chunks = [];
     req.on('data', (c) => {
+      if (tooLarge) return;
       size += c.length;
       if (size > MAX_BODY) {
-        reject(badRequest('Request body too large'));
-        req.destroy();
+        tooLarge = true;
+        chunks.length = 0;
+        // Answer 400 and close the connection instead of destroying the socket,
+        // which left the client with a reset and no explanation.
+        reject(Object.assign(badRequest('Request body too large'), { closeConnection: true }));
       } else {
         chunks.push(c);
       }
     });
     req.on('end', () => {
+      if (tooLarge) return;
       if (!chunks.length) return resolve({});
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
@@ -41,7 +52,44 @@ function readBody(req) {
   });
 }
 
-const intOrNull = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+function intOrNull(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw badRequest(`Expected a number, got "${String(v).slice(0, 40)}"`);
+  return n;
+}
+
+function ipv4ToInt(text) {
+  const parts = String(text).split('.');
+  if (parts.length !== 4 || parts.some((x) => !/^\d{1,3}$/.test(x) || Number(x) > 255)) return null;
+  return parts.reduce((acc, x) => acc * 256 + Number(x), 0);
+}
+
+/**
+ * Address to listen on. Without a subnet it is `bind` as given. With a subnet
+ * (IPv4 CIDR, e.g. 172.20.0.0/16) it is the address of the interface inside it, so
+ * the gateway can listen on the internal Docker network only. Throws when no
+ * interface matches: starting on a wider address than asked for would be unsafe.
+ */
+export function pickBindAddress(bind, subnet, interfaces = os.networkInterfaces()) {
+  const wanted = String(subnet || '').trim();
+  if (!wanted) return bind || '0.0.0.0';
+  const [net, bitsText = '32'] = wanted.split('/');
+  const base = ipv4ToInt(net);
+  const bits = Number(bitsText);
+  if (base === null || !Number.isInteger(bits) || bits < 0 || bits > 32) {
+    throw new Error(`GATEWAY_BIND_SUBNET must be an IPv4 CIDR like 172.20.0.0/16, got "${wanted}"`);
+  }
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  for (const addrs of Object.values(interfaces || {})) {
+    for (const a of addrs || []) {
+      if (a.family !== 'IPv4' && a.family !== 4) continue;
+      const ip = ipv4ToInt(a.address);
+      if (ip !== null && ((ip & mask) >>> 0) === ((base & mask) >>> 0)) return a.address;
+    }
+  }
+  throw new Error(`GATEWAY_BIND_SUBNET ${wanted} matches no network interface; refusing to start on a wider address`);
+}
 
 function needSymbol(q) {
   const symbol = q.get('symbol');
@@ -60,9 +108,14 @@ function needTimeframe(q) {
  * only (no published port) and every route except /health needs the shared
  * secret in `X-Gateway-Secret`, because it can place orders on a real account.
  */
-export function createServer(app, { secret, port }) {
+export function createServer(app, { secret, port, bind = '0.0.0.0', bindSubnet = '', allowOpen = false, allowQuerySecret = false, dataOnly = false }) {
   const routes = [];
   const route = (method, pattern, handler) => routes.push({ method, pattern, handler });
+  const listenAddress = pickBindAddress(bind, bindSubnet);
+  const orderRoute = (method, pattern, handler) => route(method, pattern, (q, m, body) => {
+    if (dataOnly) throw permissionDenied('This gateway runs in data-only mode (GATEWAY_DATA_ONLY=1): order routes are disabled');
+    return handler(q, m, body);
+  });
 
   route('GET', /^\/health$/, () => app.health());
   route('GET', /^\/status$/, () => app.status());
@@ -78,25 +131,25 @@ export function createServer(app, { secret, port }) {
   route('GET', /^\/orders\/open$/, (q) => app.router().openOrders(q.get('symbol')));
   route('GET', /^\/orders$/, (q) => app.router().orders(q.get('symbol'), intOrNull(q.get('since'))));
   route('GET', /^\/order\/([^/]+)$/, (q, m) => app.router().getOrder(m[1]));
-  route('POST', /^\/order$/, (q, m, body) => app.router().place(body));
-  route('POST', /^\/order\/([^/]+)\/cancel$/, (q, m) => app.router().cancel(m[1]));
-  route('POST', /^\/order\/([^/]+)\/modify$/, (q, m, body) => app.router().modify(m[1], body));
+  orderRoute('POST', /^\/order$/, (q, m, body) => app.router().place(body));
+  orderRoute('POST', /^\/order\/([^/]+)\/cancel$/, (q, m) => app.router().cancel(m[1]));
+  orderRoute('POST', /^\/order\/([^/]+)\/modify$/, (q, m, body) => app.router().modify(m[1], body));
   route('GET', /^\/mytrades$/, (q) => app.router().myTrades(q.get('symbol'), intOrNull(q.get('since'))));
-  route('POST', /^\/position\/close$/, (q, m, body) => app.router().closePosition(body.symbol));
+  orderRoute('POST', /^\/position\/close$/, (q, m, body) => app.router().closePosition(body.symbol));
   route('GET', /^\/guard$/, () => app.guardState());
   route('POST', /^\/guard\/snapshot$/, (q, m, body) => app.guardSnapshot(body));
   route('POST', /^\/guard\/reset$/, (q, m, body) => app.guardReset(body.scope));
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://gateway');
-    const send = (status, payload) => {
+    const send = (status, payload, headers = {}) => {
       const body = JSON.stringify(payload);
-      res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+      res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...headers });
       res.end(body);
     };
 
     try {
-      if (url.pathname !== '/health' && !secretOk(secret, req.headers['x-gateway-secret'])) {
+      if (url.pathname !== '/health' && !secretOk(secret, req.headers['x-gateway-secret'], allowOpen)) {
         throw new GatewayError('Bad or missing X-Gateway-Secret', { status: 401, kind: 'AuthenticationError' });
       }
       for (const r of routes) {
@@ -109,7 +162,7 @@ export function createServer(app, { secret, port }) {
       }
       throw new GatewayError(`No route ${req.method} ${url.pathname}`, { status: 404, kind: 'BadRequest' });
     } catch (err) {
-      if (err instanceof GatewayError) return send(err.status, err.toJSON());
+      if (err instanceof GatewayError) return send(err.status, err.toJSON(), err.closeConnection ? { Connection: 'close' } : {});
       console.error(`[server] ${req.method} ${url.pathname} failed:`, err);
       return send(500, { error: err.message, kind: 'ExchangeError' });
     }
@@ -123,7 +176,9 @@ export function createServer(app, { secret, port }) {
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://gateway');
-    if (url.pathname !== '/ws' || !secretOk(secret, req.headers['x-gateway-secret'] || url.searchParams.get('secret'))) {
+    // A secret in the URL ends up in access logs and proxies, so it is opt-in.
+    const given = req.headers['x-gateway-secret'] || (allowQuerySecret ? url.searchParams.get('secret') : null);
+    if (url.pathname !== '/ws' || !secretOk(secret, given, allowOpen)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -172,6 +227,6 @@ export function createServer(app, { secret, port }) {
     }
   };
 
-  server.listen(port, '0.0.0.0', () => console.log(`[server] listening on :${server.address().port}`));
+  server.listen(port, listenAddress, () => console.log(`[server] listening on ${listenAddress}:${server.address().port}`));
   return { server, wss, broadcast, address: () => server.address() };
 }

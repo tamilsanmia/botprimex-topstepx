@@ -3,7 +3,7 @@ import path from 'node:path';
 import { CandleStore } from './candles.js';
 import { loadConfig, pairOf, rootOf } from './config.js';
 import { ContractBook } from './contracts.js';
-import { GatewayError } from './errors.js';
+import { GatewayError, badRequest } from './errors.js';
 import { AccountGuard, summarizeFills } from './guard.js';
 import { ContinuousHistory } from './history.js';
 import { RateLimiter } from './limiter.js';
@@ -23,9 +23,65 @@ import { UserStream } from './userStream.js';
 
 const GUARD_THROTTLE_MS = 200;
 const HISTORY_DAYS = 90;
+const SNAPSHOT_LIMITS = Object.freeze({ positions: 100, closedResults: 5000, pairLength: 40 });
+
+export class StartupError extends Error {}
+
+/** Settings the gateway must never run with. Throws StartupError. */
+export function assertStartable(cfg) {
+  if (!cfg.secret && !cfg.mock) {
+    throw new StartupError('GATEWAY_SECRET is empty. The gateway can place orders on a real account, so it refuses to start without a shared secret (generate one with: openssl rand -hex 32). Only PROJECTX_MOCK=1 may run without one.');
+  }
+}
+
+const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Checks the body of POST /guard/snapshot and returns a copy holding only the known
+ * fields. The snapshot feeds the account guard, so a malformed one must be rejected
+ * (400) rather than turned into NaN balances.
+ */
+export function validateSnapshot(body) {
+  const bad = (msg) => badRequest(`Invalid guard snapshot: ${msg}`);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('body must be a JSON object');
+
+  for (const key of ['realized_total', 'day_realized', 'entries_today']) {
+    if (!finite(body[key])) throw bad(`${key} must be a finite number`);
+  }
+  if (body.entries_today < 0 || !Number.isInteger(body.entries_today)) throw bad('entries_today must be a non-negative integer');
+
+  if (!Array.isArray(body.closed_results)) throw bad('closed_results must be an array of numbers');
+  if (body.closed_results.length > SNAPSHOT_LIMITS.closedResults) throw bad(`closed_results has more than ${SNAPSHOT_LIMITS.closedResults} entries`);
+  if (!body.closed_results.every(finite)) throw bad('closed_results must contain finite numbers only');
+
+  if (!Array.isArray(body.positions)) throw bad('positions must be an array');
+  if (body.positions.length > SNAPSHOT_LIMITS.positions) throw bad(`positions has more than ${SNAPSHOT_LIMITS.positions} entries`);
+  const positions = body.positions.map((p, i) => {
+    if (!p || typeof p !== 'object') throw bad(`positions[${i}] must be an object`);
+    if (typeof p.pair !== 'string' || !p.pair || p.pair.length > SNAPSHOT_LIMITS.pairLength) throw bad(`positions[${i}].pair must be a short string`);
+    if (p.side !== 'long' && p.side !== 'short') throw bad(`positions[${i}].side must be long or short`);
+    if (!finite(p.contracts) || p.contracts < 0) throw bad(`positions[${i}].contracts must be a non-negative number`);
+    if (!finite(p.entry_price) || p.entry_price <= 0) throw bad(`positions[${i}].entry_price must be a positive number`);
+    const out = { pair: p.pair, side: p.side, contracts: p.contracts, entry_price: p.entry_price };
+    if (p.mark !== undefined && p.mark !== null) {
+      if (!finite(p.mark) || p.mark <= 0) throw bad(`positions[${i}].mark must be a positive number`);
+      out.mark = p.mark;
+    }
+    return out;
+  });
+
+  return {
+    realized_total: body.realized_total,
+    day_realized: body.day_realized,
+    entries_today: body.entries_today,
+    closed_results: body.closed_results,
+    positions,
+  };
+}
 
 export class GatewayApp {
   constructor(cfg) {
+    assertStartable(cfg);
     this.cfg = cfg;
     this.stake = cfg.stakeCurrency;
     this.limiter = new RateLimiter(cfg.gateway.rate_limits);
@@ -123,7 +179,15 @@ export class GatewayApp {
       reconcileSecs: cfg.gateway.reconcile_secs,
     });
 
-    const server = createServer(this, { secret: cfg.secret, port: cfg.port });
+    const server = createServer(this, {
+      secret: cfg.secret,
+      port: cfg.port,
+      bind: cfg.bind,
+      bindSubnet: cfg.bindSubnet,
+      allowOpen: cfg.mock,
+      allowQuerySecret: cfg.allowQuerySecret,
+      dataOnly: cfg.dataOnly,
+    });
     this.server = server;
     this.store.on('candles', (root, tf, bars) => {
       server.broadcast(`ohlcv|${root}|${tf}`, { channel: 'ohlcv', symbol: pairOf(root, this.stake), timeframe: tf, data: bars });
@@ -132,7 +196,11 @@ export class GatewayApp {
 
     await this.market.start(roots);
 
-    if (this.guardSource === 'projectx') {
+    if (cfg.dataOnly) {
+      // Market data and history only: no account, no user hub, no guard.
+      this.user.accountError = 'This gateway runs in data-only mode (GATEWAY_DATA_ONLY=1): it has no trading account.';
+      console.warn('[gateway] DATA ONLY: order routes are disabled, no account is selected, the guard is off');
+    } else if (this.guardSource === 'projectx') {
       await this.retry('load account', () => this.user.start({ tradesSince: Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000 }));
     } else {
       try {
@@ -153,13 +221,15 @@ export class GatewayApp {
       config: cfg.gateway,
       notify: this.notify,
     });
-    this.setupGuard();
-    this.router_.guard = this.guard ? () => this.guard : null;
     this.user.on('orphan-cancelled', (o, reason) => this.notify(`cancelled orphan protective order ${o.id} (${reason})`));
-    for (const ev of ['trade', 'position', 'account']) this.user.on(ev, () => this.scheduleGuard());
+    if (!cfg.dataOnly) {
+      this.setupGuard();
+      this.router_.guard = this.guard ? () => this.guard : null;
+      for (const ev of ['trade', 'position', 'account']) this.user.on(ev, () => this.scheduleGuard());
 
-    this.guardTimer = setInterval(() => this.evaluateGuard(), 1000);
-    this.guardTimer.unref?.();
+      this.guardTimer = setInterval(() => this.evaluateGuard(), 1000);
+      this.guardTimer.unref?.();
+    }
     this.rollTimer = setInterval(() => this.checkRolls().catch((err) => console.warn(`[gateway] roll check failed: ${err.message}`)), 10 * 60 * 1000);
     this.rollTimer.unref?.();
 
@@ -409,7 +479,7 @@ export class GatewayApp {
     if (this.guardSource !== 'freqtrade') {
       throw new GatewayError('Snapshots are only accepted when the guard runs on Freqtrade dry-run data', { status: 409, kind: 'BadRequest' });
     }
-    this.snapshot = body;
+    this.snapshot = validateSnapshot(body);
     return this.evaluateGuard() ?? this.guardState();
   }
 
@@ -434,7 +504,16 @@ export class GatewayApp {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const app = new GatewayApp(loadConfig());
+  let app;
+  try {
+    app = new GatewayApp(loadConfig());
+  } catch (err) {
+    if (err instanceof StartupError) {
+      console.error(`[gateway] refusing to start: ${err.message}`);
+      process.exit(2);
+    }
+    throw err;
+  }
   const shutdown = async (signal) => {
     console.log(`[gateway] ${signal}, shutting down`);
     await app.stop();

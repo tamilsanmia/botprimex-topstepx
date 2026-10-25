@@ -6,8 +6,9 @@ import { after, before, test } from 'node:test';
 import { WebSocket } from 'ws';
 
 import { GatewayError } from '../src/errors.js';
+import { validateSnapshot } from '../src/index.js';
 import { createServer } from '../src/server.js';
-import { SECRET } from './helpers.js';
+import { SECRET, makeMockApp } from './helpers.js';
 
 const calls = [];
 const record = (name) => (...args) => {
@@ -129,7 +130,7 @@ test('a body over 64 KB is refused with 400 BadRequest, or the connection is cut
     assert.equal(outcome.status, 400);
     assert.equal(JSON.parse(outcome.text).kind, 'BadRequest');
   } else {
-    // The handler destroys the request on overflow, so the client may only see a reset.
+    // The server answers 400 and closes; a client still writing the body may only see the reset.
     assert.ok(['ECONNRESET', 'EPIPE'].includes(outcome.error), `unexpected error ${outcome.error}`);
   }
   assert.equal(calls.filter((c) => c.name === 'place').length, 0, 'the handler never ran');
@@ -351,4 +352,183 @@ test('ws: the guard channel key is "guard"', async () => {
   handle.broadcast('guard', { channel: 'guard', data: { status: 'day_locked' } });
   assert.deepEqual(await next, { channel: 'guard', data: { status: 'day_locked' } });
   ws.close();
+});
+
+/* ----------------------------------------------- hardening (H7 / L4 / H6) -- */
+
+/** Starts a second server with other options; returns helpers and a close(). */
+async function startServer(opts) {
+  const h = createServer(app, { port: 0, ...opts });
+  if (!h.server.listening) await once(h.server, 'listening');
+  const url = `http://127.0.0.1:${h.server.address().port}`;
+  const open = [];
+  return {
+    h,
+    url,
+    async get(route, headers = {}) {
+      const res = await fetch(`${url}${route}`, { headers });
+      return { status: res.status, body: await res.json() };
+    },
+    async post(route, body, headers = {}) {
+      const res = await fetch(`${url}${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body ?? {}) });
+      return { status: res.status, body: await res.json() };
+    },
+    ws(path = '/ws', headers = {}) {
+      const w = new WebSocket(`ws://127.0.0.1:${h.server.address().port}${path}`, { headers });
+      w.on('error', () => {});
+      open.push(w);
+      return w;
+    },
+    async close() {
+      for (const w of open) w.terminate();
+      h.wss.close();
+      h.server.closeAllConnections?.();
+      await new Promise((resolve) => h.server.close(resolve));
+    },
+  };
+}
+
+test('an empty secret fails closed: every route but /health is 401, even with an empty header', async () => {
+  const s = await startServer({ secret: '' });
+  try {
+    assert.equal((await s.get('/health')).status, 200);
+    assert.equal((await s.get('/status')).status, 401);
+    assert.equal((await s.get('/status', { 'X-Gateway-Secret': '' })).status, 401);
+    assert.equal((await s.post('/order', {})).status, 401);
+    const ws = s.ws();
+    const [, res] = await once(ws, 'unexpected-response');
+    assert.equal(res.statusCode, 401);
+    res.resume();
+  } finally {
+    await s.close();
+  }
+});
+
+test('allowOpen (mock mode) lets an empty secret through, but a configured secret is still enforced', async () => {
+  const open = await startServer({ secret: '', allowOpen: true });
+  try {
+    assert.equal((await open.get('/status')).status, 200);
+  } finally {
+    await open.close();
+  }
+  const guarded = await startServer({ secret: SECRET, allowOpen: true });
+  try {
+    assert.equal((await guarded.get('/status')).status, 401);
+    assert.equal((await guarded.get('/status', { 'X-Gateway-Secret': SECRET })).status, 200);
+  } finally {
+    await guarded.close();
+  }
+});
+
+test('/ws?secret= is rejected by default and accepted only with allowQuerySecret', async () => {
+  const strict = await startServer({ secret: SECRET });
+  try {
+    const ws = strict.ws(`/ws?secret=${SECRET}`);
+    const [, res] = await once(ws, 'unexpected-response');
+    assert.equal(res.statusCode, 401);
+    res.resume();
+    const header = strict.ws('/ws', { 'x-gateway-secret': SECRET });
+    await once(header, 'open');
+  } finally {
+    await strict.close();
+  }
+  const lax = await startServer({ secret: SECRET, allowQuerySecret: true });
+  try {
+    const ws = lax.ws(`/ws?secret=${SECRET}`);
+    await once(ws, 'open');
+    const bad = lax.ws('/ws?secret=nope');
+    const [, res] = await once(bad, 'unexpected-response');
+    assert.equal(res.statusCode, 401);
+    res.resume();
+  } finally {
+    await lax.close();
+  }
+});
+
+test('a non-numeric since or limit is 400 BadRequest instead of NaN', async () => {
+  for (const route of ['/ohlcv?symbol=MES/USD:USD&since=abc', '/ohlcv?symbol=MES/USD:USD&limit=NaN', '/trades?symbol=MES/USD:USD&limit=Infinity', '/orders?since=1e999', '/mytrades?since=x', '/orderflow/features?symbol=MES/USD:USD&since=zz']) {
+    calls.length = 0;
+    const res = await call('GET', route);
+    assert.equal(res.status, 400, route);
+    assert.equal(res.body.kind, 'BadRequest', route);
+    assert.equal(calls.length, 0, `${route}: the handler never ran`);
+  }
+  const ok = await call('GET', '/ohlcv?symbol=MES/USD:USD&since=&limit=5');
+  assert.equal(ok.status, 200, 'an empty value still means "not given"');
+});
+
+test('data-only mode: order routes are 403 PermissionDenied and never reach the router, reads still work', async () => {
+  const s = await startServer({ secret: SECRET, dataOnly: true });
+  const h = { 'X-Gateway-Secret': SECRET };
+  try {
+    calls.length = 0;
+    for (const [route, body] of [['/order', { symbol: 'MES/USD:USD' }], ['/order/12/cancel', {}], ['/order/12/modify', { price: 1 }], ['/position/close', { symbol: 'MES/USD:USD' }]]) {
+      const res = await s.post(route, body, h);
+      assert.equal(res.status, 403, route);
+      assert.equal(res.body.kind, 'PermissionDenied', route);
+    }
+    assert.equal(calls.length, 0, 'no router method ran');
+    assert.equal((await s.get('/markets', h)).status, 200);
+    assert.equal((await s.get('/ticker?symbol=MES/USD:USD', h)).status, 200);
+    assert.equal((await s.post('/order', {}, {})).status, 401, 'auth still comes first');
+  } finally {
+    await s.close();
+  }
+});
+
+test('validateSnapshot accepts the Python payload and keeps only known fields', () => {
+  const body = {
+    realized_total: 120.5, day_realized: -20, entries_today: 3, closed_results: [10, -5.5],
+    positions: [{ pair: 'MES/USD:USD', side: 'long', contracts: 2, entry_price: 6000.25, extra: 'dropped' }],
+    unexpected: true,
+  };
+  assert.deepEqual(validateSnapshot(body), {
+    realized_total: 120.5, day_realized: -20, entries_today: 3, closed_results: [10, -5.5],
+    positions: [{ pair: 'MES/USD:USD', side: 'long', contracts: 2, entry_price: 6000.25 }],
+  });
+  const withMark = validateSnapshot({ ...body, positions: [{ ...body.positions[0], mark: 6001 }] });
+  assert.equal(withMark.positions[0].mark, 6001);
+});
+
+test('validateSnapshot rejects malformed bodies with 400 BadRequest', () => {
+  const good = { realized_total: 0, day_realized: 0, entries_today: 0, closed_results: [], positions: [] };
+  const position = { pair: 'MES/USD:USD', side: 'long', contracts: 1, entry_price: 6000 };
+  const cases = {
+    'not an object': null,
+    'array body': [],
+    'missing realized_total': { ...good, realized_total: undefined },
+    'string number': { ...good, day_realized: '5' },
+    'NaN total': { ...good, realized_total: Number.NaN },
+    'fractional entries_today': { ...good, entries_today: 1.5 },
+    'negative entries_today': { ...good, entries_today: -1 },
+    'closed_results not an array': { ...good, closed_results: 'x' },
+    'closed_results with a string': { ...good, closed_results: [1, '2'] },
+    'closed_results too long': { ...good, closed_results: new Array(5001).fill(1) },
+    'positions missing': { ...good, positions: undefined },
+    'too many positions': { ...good, positions: new Array(101).fill(position) },
+    'position not an object': { ...good, positions: ['x'] },
+    'position without pair': { ...good, positions: [{ ...position, pair: '' }] },
+    'position with a huge pair': { ...good, positions: [{ ...position, pair: 'x'.repeat(100) }] },
+    'bad side': { ...good, positions: [{ ...position, side: 'flat' }] },
+    'negative contracts': { ...good, positions: [{ ...position, contracts: -1 }] },
+    'zero entry price': { ...good, positions: [{ ...position, entry_price: 0 }] },
+    'bad mark': { ...good, positions: [{ ...position, mark: 'x' }] },
+  };
+  for (const [name, body] of Object.entries(cases)) {
+    assert.throws(() => validateSnapshot(body), (err) => err instanceof GatewayError && err.status === 400 && err.kind === 'BadRequest', name);
+  }
+});
+
+test('POST /guard/snapshot on the real app: a bad shape is 400, a good one is evaluated', async () => {
+  const gw = await makeMockApp({ gateway: { account_source: 'freqtrade' } });
+  try {
+    const bad = await gw.post('/guard/snapshot', { realized_total: 'lots' });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.kind, 'BadRequest');
+    const good = await gw.post('/guard/snapshot', { realized_total: 0, day_realized: 0, entries_today: 0, closed_results: [], positions: [] });
+    assert.equal(good.status, 200);
+    assert.ok(good.body.status);
+  } finally {
+    await gw.stop();
+  }
 });

@@ -12,7 +12,7 @@ import { MarketStream } from './marketStream.js';
 import { createMockUpstream } from './mock.js';
 import { createNotifier } from './notifier.js';
 import { OrderflowService } from './orderflow.js';
-import { ProjectXClient } from './projectx.js';
+import { ProjectXClient, accountProduct } from './projectx.js';
 import { OrderRouter } from './router.js';
 import { RulesError, resolveRules } from './rules.js';
 import { createServer } from './server.js';
@@ -327,7 +327,12 @@ export class GatewayApp {
     }
     let resolved;
     try {
-      resolved = resolveRules(cfg.topstep, this.user.account);
+      // When the guard runs on Freqtrade's simulated account (dry-run), topstep.account_name says which account to
+      // simulate and wins over an auto-detected one. With the real account (live) it is ignored.
+      const named = this.guardSource === 'freqtrade' && cfg.topstep.account_name
+        ? { id: null, name: String(cfg.topstep.account_name), ...accountProduct(cfg.topstep.account_name) }
+        : null;
+      resolved = resolveRules(cfg.topstep, named || this.user.account);
     } catch (err) {
       if (err instanceof RulesError) {
         console.error(`[gateway] ${err.message}`);

@@ -121,6 +121,10 @@
     "phase": "auto",
     "preset": "auto",
     "start_balance": "auto",
+    // Dry-run only: the account to simulate when phase/preset are "auto", for example "50KTC-DRY",
+    // "100KXFA-1" or "150KLFA-1" (size + TC, XFA or LFA). It wins over an auto-detected account and
+    // is ignored on a live account, which always supplies its own name. Backtests read it too.
+    // "account_name": "50KTC-DRY",
     "timezone": "America/New_York",
     "session": {
       "reset_time": "18:00", "eod_time": "16:10",
@@ -128,6 +132,10 @@
       "hold_mode": "intraday",
       "trading_windows": [],
       "trade_weekends": false,
+      // CME holidays and early closes for 2026-2027 (src/holidays.js, see docs/topstep-rules-sources.md):
+      // a closed day acts like a weekend, an early close stops entries 35 min and flattens 20 min before
+      // the halt (13:00 ET, Topstep closes positions 15 min before). false ignores the calendar.
+      "use_holiday_calendar": true,
       "news_blackout": [{ "days": "mon-fri", "start": "08:28", "end": "08:35", "label": "8:30 data" }]
     },
     "lots": { "micro_ratio": 10, "block_mini_micro_overlap": true, "overrides": {} },

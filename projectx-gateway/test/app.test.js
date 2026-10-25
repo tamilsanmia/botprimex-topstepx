@@ -274,3 +274,18 @@ test('stop() can be called more than once', async () => {
   await probe.app.stop();
   await probe.stop();
 });
+test('topstep.account_name resolves phase and size for a dry-run guard that has no ProjectX account', async () => {
+  const dry = await makeMockApp({
+    gateway: { account_source: 'freqtrade' },
+    topstep: { phase: 'auto', preset: 'auto', start_balance: 'auto', account_name: '100KTC-DRY-1' },
+  });
+  try {
+    const res = await dry.post('/guard/snapshot', { realized_total: 0, day_realized: 0, entries_today: 0, closed_results: [], positions: [] });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.metrics.startBalance, 100000);
+    assert.equal(res.body.metrics.dailyLossLimit, 2000);
+    assert.equal(res.body.metrics.profitTarget, 6000);
+  } finally {
+    await dry.stop();
+  }
+});

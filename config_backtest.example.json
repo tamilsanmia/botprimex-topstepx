@@ -68,15 +68,21 @@
   "topstep": {
     // false = no Topstep rules in backtests (loss limits, consistency, sessions, counters, contract cap).
     "enabled": true,
-    // Set these to the account you want to simulate.
+    // Set these to the account you want to simulate. "auto" for phase/preset is read from
+    // account_name (50KTC -> evaluation 50K, 100KXFA -> funded, 150KLFA -> live_funded) or, for
+    // the size, from a numeric start_balance. If neither resolves, the backtest stops with a
+    // configuration error instead of assuming a 50K evaluation.
     "phase": "evaluation",
     "preset": "50k",
     "start_balance": 50000,
+    // "account_name": "50KTC-BACKTEST",
     "timezone": "America/New_York",
     "session": {
       "reset_time": "18:00", "eod_time": "16:10",
       "no_entry_before": "18:05", "no_entry_after": "15:45", "flat_by": "16:05",
       "hold_mode": "intraday", "trading_windows": [], "trade_weekends": false,
+      // false ignores the CME holiday and early-close calendar (2026-2027).
+      "use_holiday_calendar": true,
       "news_blackout": [{ "days": "mon-fri", "start": "08:28", "end": "08:35", "label": "8:30 data" }]
     },
     "lots": { "micro_ratio": 10, "block_mini_micro_overlap": true, "overrides": {} },

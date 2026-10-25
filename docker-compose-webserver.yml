@@ -3,11 +3,22 @@
 # its own projectx-gateway for history downloads. Runs alongside the live stack in
 # docker-compose.yml without sharing containers, guard state or tick files.
 #
-#   docker compose -f docker-compose-webserver.yml build
+#   ./topstep build                        # builds the images (both stacks share them)
 #   ./download-data.sh                     # history through the gateway
-#   docker compose -f docker-compose-webserver.yml up -d
-#   open http://<server>:8095
-#   docker compose -f docker-compose-webserver.yml down && docker compose -f docker-compose-webserver.yml up -d
+#   ./topstep backtest-ui                  # = docker compose -f docker-compose-webserver.yml up -d
+#   open http://127.0.0.1:8095
+#
+# The web app is private by default: it listens on 127.0.0.1 only. For access from
+# another machine use an SSH tunnel (ssh -L 8095:127.0.0.1:8095 <user>@<server>) or
+# put a TLS reverse proxy in front of it. Only if you accept the exposure, set
+# WEBSERVER_BIND=0.0.0.0 in .env. In every case the api_server password,
+# jwt_secret_key and ws_token in config-futures-backtest.json must be real secrets:
+# the web app refuses to start with empty or "change-me" values.
+#
+# The gateway here is data-only (GATEWAY_DATA_ONLY=1): it cannot place, change or
+# cancel orders and runs no account, user hub or guard. It still logs in to
+# ProjectX to read history and market metadata, so PROJECTX_USERNAME and
+# PROJECTX_API_KEY in .env are required here too.
 name: botprimex-backtest
 
 services:
@@ -23,6 +34,8 @@ services:
       # Separate state and tick directory from the live gateway.
       GATEWAY_DATA_DIR: /freqtrade/user_data/backtest-gateway
       GATEWAY_PORT: "8787"
+      # Market data only: the order routes answer 403. Never remove this here.
+      GATEWAY_DATA_ONLY: "1"
     volumes:
       - "./user_data:/freqtrade/user_data"
     networks:
@@ -47,11 +60,10 @@ services:
       - backend
       - egress
     # FreqUI / API on host port 8095 (8080 and 8090 are taken on this server).
-    # Public on all interfaces: use a strong api_server password. To keep it private,
-    # set WEBSERVER_BIND=127.0.0.1 in .env and use an SSH tunnel.
+    # Loopback by default; see the header for remote access.
     # See https://www.freqtrade.io/en/stable/rest-api/
     ports:
-      - "${WEBSERVER_BIND:-0.0.0.0}:${WEBSERVER_PORT:-8095}:8080"
+      - "${WEBSERVER_BIND:-127.0.0.1}:${WEBSERVER_PORT:-8095}:8080"
     command: >
       webserver
       --logfile /freqtrade/user_data/logs/freqtrade-webserver.log

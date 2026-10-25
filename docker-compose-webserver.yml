@@ -37,10 +37,25 @@ services:
       # Market data only: the order routes answer 403. Never remove this here.
       GATEWAY_DATA_ONLY: "1"
     volumes:
-      - "./user_data:/freqtrade/user_data"
+      # Least access: the config read-only, and only the gateway's own directory
+      # writable (./topstep setup creates it; it must be owned by uid 1000).
+      - "./user_data/config-futures-backtest.json:/freqtrade/user_data/config-futures-backtest.json:ro"
+      - "./user_data/backtest-gateway:/freqtrade/user_data/backtest-gateway"
     networks:
       - backend
       - egress
+    read_only: true
+    tmpfs:
+      - /tmp  # the tick recorder unpacks old days here
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   freqtrade-webserver:
     build:
@@ -64,6 +79,22 @@ services:
     # See https://www.freqtrade.io/en/stable/rest-api/
     ports:
       - "${WEBSERVER_BIND:-127.0.0.1}:${WEBSERVER_PORT:-8095}:8080"
+    # Writes only to user_data (mounted) and /tmp. Checked with `docker run` for
+    # trade (dry-run), backtesting and list-exchanges. Freqtrade falls back to
+    # `sudo chown` when it cannot create a directory under user_data; that is
+    # blocked here, so user_data must already be owned by uid 1000 (./topstep setup).
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: >
       webserver
       --logfile /freqtrade/user_data/logs/freqtrade-webserver.log

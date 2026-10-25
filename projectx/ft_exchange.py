@@ -20,6 +20,8 @@ from freqtrade.exceptions import ConfigurationError, OperationalException
 from freqtrade.exchange.exchange import Exchange
 from freqtrade.util import FtTTLCache
 
+from .costs import cost_ratio, costs_config
+
 logger = logging.getLogger(__name__)
 
 RATE_CACHE_TTL_SECS = 1
@@ -82,6 +84,37 @@ class Projectx(Exchange):
                 "candle-count based protections and ROI timing may behave differently.",
                 timeframe,
             )
+
+    def _costs_apply(self) -> dict | None:
+        """The topstep_costs block while costs apply: backtest, hyperopt and dry-run (all run with dry_run)."""
+        costs = costs_config(self._config)
+        return costs if self._config.get("dry_run") and costs.get("enabled") else None
+
+    def get_fee(self, symbol: str, order_type: str = "", side: str = "", amount: float = 1,
+                price: float = 1, taker_or_maker="maker") -> float:
+        costs = self._costs_apply()
+        if costs is None:
+            return super().get_fee(symbol, order_type, side, amount, price, taker_or_maker)
+        # A call without a price (Freqtrade's own rate lookups) or for an unknown market costs nothing;
+        # the per-contract cost is applied to the trade once its fill price is known.
+        if not price or price <= 1:
+            return 0.0
+        market = (self._markets.get(symbol) or {}).get("info") or {}
+        return cost_ratio(costs, market, price) or 0.0
+
+    def add_dry_order_fee(self, pair: str, dry_order: dict, taker_or_maker) -> dict:
+        # The base class asks for the fee without the order's price, which would drop the costs.
+        price = dry_order.get("average") or dry_order.get("price")
+        fee = self.get_fee(pair, dry_order.get("type") or "", dry_order.get("side") or "",
+                           dry_order.get("amount") or 1, price or 1, taker_or_maker)
+        dry_order.update({
+            "fee": {
+                "currency": self.get_pair_quote_currency(pair),
+                "cost": dry_order["cost"] * fee,
+                "rate": fee,
+            }
+        })
+        return dry_order
 
     def get_max_leverage(self, pair: str, stake_amount: float | None) -> float:
         return float(self._api.options.get("maxLeverage", 50))

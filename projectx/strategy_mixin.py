@@ -34,6 +34,7 @@ from freqtrade.persistence import LocalTrade, Order, Trade
 from freqtrade.strategy import stoploss_from_absolute
 
 from .backtest_guard import BacktestGuard
+from .costs import COSTS_DEFAULTS, cost_ratio, costs_config  # noqa: F401  (COSTS_DEFAULTS re-exported)
 from .gateway_client import GatewayClient
 from .orderflow import merge_features
 
@@ -82,6 +83,7 @@ class TopstepXMixin:
         super().__init__(config)
         self.tsx = {**STRATEGY_DEFAULTS, **(config.get("topstep_strategy") or {})}
         self.tsx_of = {**ORDERFLOW_DEFAULTS, **(config.get("topstep_orderflow") or {})}
+        self.tsx_costs = costs_config(config)
         tf = config.get("timeframe") or self.timeframe
         self.seconds_mode = str(tf).endswith("s")
         if self.seconds_mode and "startup_candle_count" not in config:
@@ -410,8 +412,26 @@ class TopstepXMixin:
             return False
         return True
 
+    def _apply_costs(self, trade: Trade) -> None:
+        """
+        Backtest, hyperopt and dry-run charge the per-contract fee, commission and slippage by
+        setting the trade's fee ratios. Live trading keeps the real fees from the fills.
+        """
+        if not self.tsx_costs.get("enabled") or not (self._backtesting or self.config.get("dry_run")):
+            return
+        # Freqtrade passes order_filled a deep copy of the trade, so change the stored one.
+        stored = next((t for t in self._trades(is_open=True) if t.id == trade.id), trade)
+        market = self._market(stored.pair)
+        ratio = cost_ratio(self.tsx_costs, market, stored.open_rate)
+        if ratio is None:
+            return
+        stored.fee_open = stored.fee_close = ratio
+        stored.recalc_trade_from_orders()
+
     def order_filled(self, pair: str, trade: Trade, order: Order, current_time: datetime, **kwargs) -> None:
         super().order_filled(pair, trade, order, current_time, **kwargs)
+        if order.ft_order_side == trade.entry_side:
+            self._apply_costs(trade)
         if order.ft_order_side != trade.entry_side or trade.get_custom_data(STOP_KEY) is not None:
             return
         tick = float(self._market(pair).get("tickSize") or 0)

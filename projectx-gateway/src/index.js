@@ -32,6 +32,46 @@ export function assertStartable(cfg) {
   if (!cfg.secret && !cfg.mock) {
     throw new StartupError('GATEWAY_SECRET is empty. The gateway can place orders on a real account, so it refuses to start without a shared secret (generate one with: openssl rand -hex 32). Only PROJECTX_MOCK=1 may run without one.');
   }
+  if (cfg.mock && cfg.dryRun === false) {
+    throw new StartupError('PROJECTX_MOCK=1 with dry_run=false: mock fills are synthetic, so Freqtrade would trade live on made-up prices. Set dry_run to true or unset PROJECTX_MOCK.');
+  }
+}
+
+/**
+ * Process-level error policy. A rejected promise nobody awaited is logged and
+ * announced but the gateway keeps running (it holds order state for open
+ * positions). An uncaught exception leaves unknown state, so the guard's state is
+ * flushed to disk and the process exits for Docker to restart it.
+ * Returns a function that removes the handlers.
+ */
+export function installProcessHandlers(app, { exit = (code) => process.exit(code), proc = process } = {}) {
+  const say = (text) => {
+    try {
+      Promise.resolve(app.notify?.(text)).catch(() => {});
+    } catch { /* notifying must never throw out of a handler */ }
+  };
+  const describe = (err) => (err instanceof Error ? (err.stack || err.message) : String(err));
+  const onRejection = (reason) => {
+    console.error('[gateway] unhandled rejection:', describe(reason));
+    say(`unhandled rejection (still running): ${reason instanceof Error ? reason.message : String(reason)}`);
+  };
+  const onException = (err) => {
+    console.error('[gateway] uncaught exception, exiting:', describe(err));
+    say(`uncaught exception, gateway is exiting: ${err instanceof Error ? err.message : String(err)}`);
+    try {
+      if (app.guard?.flush) app.guard.flush();
+      else app.guard?.persist();
+    } catch (flushErr) {
+      console.error('[gateway] guard flush failed:', flushErr.message);
+    }
+    exit(1);
+  };
+  proc.on('unhandledRejection', onRejection);
+  proc.on('uncaughtException', onException);
+  return () => {
+    proc.off('unhandledRejection', onRejection);
+    proc.off('uncaughtException', onException);
+  };
 }
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -514,6 +554,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     }
     throw err;
   }
+  installProcessHandlers(app);
   const shutdown = async (signal) => {
     console.log(`[gateway] ${signal}, shutting down`);
     await app.stop();

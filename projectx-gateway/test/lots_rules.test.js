@@ -69,6 +69,19 @@ test('rules: Express Funded starts at $0 and uses the scaling plan', () => {
   assert.equal(maxMiniEquivalent(r.rules, 99999), 10);
 });
 
+test('rules: an explicit funded phase without an account name still starts at $0', () => {
+  const funded = resolveRules({ phase: 'funded', preset: '50k' }, null);
+  assert.equal(funded.startBalance, 0);
+  assert.equal(funded.rules.mll_lock_balance, 0);
+  assert.equal(resolveRules({ phase: 'funded', preset: '50k', start_balance: 50000 }, null).startBalance, 50000, 'an explicit value wins');
+  assert.equal(resolveRules({ phase: 'evaluation', preset: '50k' }, null).startBalance, 50000);
+  const live = resolveRules({ phase: 'live_funded', preset: '50k' }, null);
+  assert.equal(live.startBalance, 50000);
+  assert.equal(live.rules.mll_lock_balance, null, 'a lock balance of 0 would sit below the whole floor of an account that starts at its size');
+  const bySize = resolveRules({ phase: 'evaluation', preset: 'auto', start_balance: 100000 }, null);
+  assert.equal(bySize.size, 100000);
+  assert.equal(bySize.rules.max_loss_limit, 3000);
+});
 test('rules: user values override presets, null keeps the preset, sessions merge per phase', () => {
   const r = resolveRules({
     phase: 'evaluation', preset: '150k',

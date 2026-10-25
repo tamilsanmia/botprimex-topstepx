@@ -32,6 +32,7 @@ Verified column:
 | MLL type | trailing, end-of-day balance, breached in real time including unrealized P&L | | | yes | https://help.topstep.com/en/articles/8284204-what-is-the-maximum-loss-limit |
 | MLL lock, XFA | locks at $0 once the balance reaches the MLL size | | | yes | same page. The XFA balance starts at $0. |
 | MLL lock, Combine | stays unlocked in the preset (`mll_lock_balance: null`) | | | no | The same page says in general terms that the MLL locks once it reaches the starting balance, but the excerpts only show the lock for the XFA. The unlocked floor is higher, which is the cautious side. Set `mll_lock_balance` to the account size to model the lock. |
+| MLL lock, Live Funded Account | stays unlocked in the preset (`mll_lock_balance: null`) | | | no | An LFA starts at its size, not $0. The XFA lock at a balance of 0 would sit far below the floor and switch the MLL off, so the preset no longer copies it (it did before this check). |
 | Scaling plan, XFA 50K | 0: 2, 1,500: 3, 2,000: 5 | | | no (secondary) | https://proptradingvibes.com/blog/topstep-maximum-contracts, https://h2tfunding.com/topstep-scaling-plan/. Official page: https://help.topstep.com/en/articles/8284223-what-is-the-scaling-plan (tiers not readable). Tiers apply to the balance at the start of the session. |
 | Scaling plan, XFA 100K | | 0: 3, 1,500: 4, 2,000: 6, 3,000: 10 | | no | Not seen anywhere. Kept. |
 | Scaling plan, XFA 150K | | | 0: 3, 1,500: 4, 2,000: 5, 3,000: 10, 4,500: 15 | no | Not seen anywhere. Kept. |
@@ -47,6 +48,9 @@ Verified column:
   the Profit Target, the target rises to `best day / 0.55`. That is the new `consistency_mode: "raise_target"`.
   The default stays `cap_day` (entries stop for the day at 55 % of the target), which keeps the best day
   under the limit so the target never rises. `off` ignores consistency.
+* `live_funded` no longer inherits the XFA `mll_lock_balance` of 0 (it starts at its size, so that lock
+  disabled the MLL). It keeps a trailing floor instead, the same cautious choice as in the Combine.
+* `start_balance: "auto"` with `phase: "funded"` and no account name now starts at $0, like an Express Funded Account.
 * No other preset value changed.
 
 ## Session times

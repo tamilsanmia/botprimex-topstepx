@@ -64,7 +64,10 @@ const PHASE_DEFAULTS = Object.freeze({
     consistency_pct: 55, consistency_mode: 'cap_day', max_mini_equivalent: null, stop_on_target: true, scaling_plan: null, payout: null,
   },
   funded: FUNDED_DEFAULTS,
-  live_funded: { ...FUNDED_DEFAULTS },
+  // A Live Funded Account starts at its size, not $0, so the XFA lock at a balance of 0 would sit far below
+  // the floor and switch the MLL off. Unlocked keeps the trailing floor (the cautious choice); see
+  // docs/topstep-rules-sources.md.
+  live_funded: { ...FUNDED_DEFAULTS, mll_lock_balance: null },
 });
 
 /**
@@ -124,7 +127,10 @@ export function resolveRules(topstep = {}, account = null) {
   }
   if (phase && !PHASE_DEFAULTS[phase]) problems.push(`topstep.phase must be evaluation, funded or live_funded, got "${phase}"`);
 
-  let size = isAuto(topstep.preset) ? account?.sizeUsd ?? null : sizeFromPreset(topstep.preset);
+  // With no account name the size can still come from a numeric start_balance (an Express Funded Account
+  // starts at 0, so only a positive value counts).
+  const sizeFromBalance = Number(topstep.start_balance) > 0 && !isAuto(topstep.start_balance) ? Number(topstep.start_balance) : null;
+  let size = isAuto(topstep.preset) ? account?.sizeUsd ?? sizeFromBalance : sizeFromPreset(topstep.preset);
   if (!isAuto(topstep.preset) && !size) problems.push(`topstep.preset must be "auto", "50k", "100k" or "150k", got "${topstep.preset}"`);
   if (size && !PRESETS[size]) {
     warnings.push(`no preset for a ${size / 1000}K account; every limit must be set explicitly`);
@@ -133,6 +139,9 @@ export function resolveRules(topstep = {}, account = null) {
   let startBalance = topstep.start_balance;
   if (isAuto(startBalance)) {
     if (account?.kind && STARTS_AT_ZERO.has(account.kind)) startBalance = 0;
+    // Without an account name only the phase tells: an Express Funded Account builds its balance from $0, and
+    // sizing it at the account size would put the lock balance (0) above every floor and switch the MLL off.
+    else if (!account?.kind && phase === 'funded') startBalance = 0;
     else startBalance = size;
   }
   startBalance = Number(startBalance);

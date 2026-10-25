@@ -29,7 +29,7 @@ import pandas as pd
 import talib.abstract as ta
 from pandas import DataFrame
 
-from freqtrade.persistence import Order, Trade
+from freqtrade.persistence import LocalTrade, Order, Trade
 from freqtrade.strategy import stoploss_from_absolute
 
 from .backtest_guard import BacktestGuard
@@ -93,6 +93,7 @@ class TopstepXMixin:
         self._guard_signature: str | None = None
         self._planned_stop_ticks: dict[str, float] = {}
         self._bt_guard: BacktestGuard | None = None
+        self._bt_now: datetime | None = None
 
     # ------------------------------------------------------------ gateway data --
 
@@ -100,6 +101,13 @@ class TopstepXMixin:
     def _backtesting(self) -> bool:
         dp = getattr(self, "dp", None)
         return bool(dp) and getattr(dp.runmode, "value", "") in ("backtest", "hyperopt")
+
+    def _trades(self, is_open: bool | None = None) -> list:
+        """
+        Backtests and hyperopt keep their trades in memory (LocalTrade); `Trade` needs the
+        database session, which does not exist while another job has switched it off.
+        """
+        return (LocalTrade if self._backtesting else Trade).get_trades_proxy(is_open=is_open)
 
     def _refresh_markets(self, now: datetime) -> None:
         if self._backtesting:
@@ -140,12 +148,12 @@ class TopstepXMixin:
     def _dry_run_snapshot(self, now: datetime) -> dict:
         """Freqtrade's simulated account, so the guard can run on dry-run trades."""
         session_start = self._session_start(now)
-        closed = Trade.get_trades_proxy(is_open=False)
+        closed = self._trades(is_open=False)
         today = sorted(
             (t for t in closed if t.close_date_utc and t.close_date_utc >= session_start),
             key=lambda t: t.close_date_utc,
         )
-        open_trades = Trade.get_trades_proxy(is_open=True)
+        open_trades = self._trades(is_open=True)
         entries_today = sum(
             1
             for t in closed + open_trades
@@ -168,22 +176,57 @@ class TopstepXMixin:
             ],
         }
 
+    def _mark_price(self, trade: Trade) -> float:
+        """Close of the last analysed candle: what a backtest knows when it evaluates the guard."""
+        try:
+            df, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
+            if not df.empty and pd.notna(df["close"].iloc[-1]):
+                return float(df["close"].iloc[-1])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("no mark price for %s: %s", trade.pair, e)
+        return float(trade.open_rate)
+
+    def _open_pnl(self) -> float:
+        """Open P&L of the backtest's open trades at the last analysed close, fees included."""
+        return sum(
+            t.calc_profit(self._mark_price(t)) for t in self._trades(is_open=True) if t.has_open_position
+        )
+
     def _backtest_guard(self, now: datetime) -> dict:
         if self._bt_guard is None:
             self._bt_guard = BacktestGuard(self.config)
+        if self._bt_now is not None and now < self._bt_now:
+            # The same strategy instance runs the next hyperopt epoch: start with a fresh guard.
+            self._bt_guard.reset()
+        self._bt_now = now
         session_start = self._bt_guard.session_start(now)
         closed = [
             (t.close_date_utc, t.close_profit_abs or 0.0)
-            for t in Trade.get_trades_proxy(is_open=False)
+            for t in self._trades(is_open=False)
             if t.close_date_utc
         ]
         entries_today = sum(
             1
-            for t in Trade.get_trades_proxy()
+            for t in self._trades()
             for o in t.select_filled_orders(t.entry_side)
             if o.order_filled_utc and o.order_filled_utc >= session_start
         )
-        return self._bt_guard.evaluate(now, sorted(closed), entries_today)
+        return self._bt_guard.evaluate(now, sorted(closed), entries_today, unrealized=self._open_pnl())
+
+    def _reset_state(self) -> None:
+        self._guard = {}
+        self._guard_at = None
+        self._guard_signature = None
+        self._planned_stop_ticks = {}
+        self._bt_guard = None
+        self._bt_now = None
+
+    def bot_start(self, **kwargs) -> None:
+        super().bot_start(**kwargs)
+        self._reset_state()
+        if self._backtesting:
+            # Build the guard now so an invalid topstep block stops the run at start-up.
+            self._bt_guard = BacktestGuard(self.config)
 
     def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
         super().bot_loop_start(current_time=current_time, **kwargs)
@@ -246,8 +289,12 @@ class TopstepXMixin:
     def _lot(self, pair: str) -> dict:
         return self._market(pair).get("lot") or {"weight": 1.0, "group": pair}
 
+    def _unknown_root(self, pair: str) -> bool:
+        """The gateway flags roots missing from its lot table; like the gateway guard, refuse them."""
+        return (self._market(pair).get("lot") or {}).get("known") is False
+
     def _held_legs(self, exclude_pair: str | None = None) -> list[tuple[str, float]]:
-        return [(t.pair, self._contracts(t)) for t in Trade.get_trades_proxy(is_open=True) if t.pair != exclude_pair]
+        return [(t.pair, self._contracts(t)) for t in self._trades(is_open=True) if t.pair != exclude_pair]
 
     def _overlap_conflict(self, pair: str) -> str | None:
         if not (self.config.get("topstep", {}).get("lots", {}) or {}).get("block_mini_micro_overlap", True):
@@ -313,6 +360,9 @@ class TopstepXMixin:
         if not ok:
             self._log_skip("%s entry skipped: %s", pair, why)
             return 0.0
+        if self._unknown_root(pair):
+            self._log_skip("%s entry skipped: unknown contract root (not in the lot table)", pair)
+            return 0.0
         conflict = self._overlap_conflict(pair)
         if conflict:
             self._log_skip("%s entry skipped: %s already held in the same mini/micro group", pair, conflict)
@@ -342,6 +392,9 @@ class TopstepXMixin:
             return False
         if self._roll_blocked(pair):
             self._log_skip("%s entry blocked: front contract expires within %s days", pair, self.tsx["roll_guard_days"])
+            return False
+        if self._unknown_root(pair):
+            self._log_skip("%s entry blocked: unknown contract root (not in the lot table)", pair)
             return False
         conflict = self._overlap_conflict(pair)
         if conflict:

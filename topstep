@@ -15,7 +15,10 @@ usage() {
 Usage: ./topstep <command> [options]
 
 Setup
-  setup                 Create .env and user_data/ (configs, strategies) if missing
+  setup                 Create .env and user_data/ (configs, strategies) if missing.
+                        Never overwrites: a strategy that differs from the repo copy is
+                        kept and reported. FORCE=1 ./topstep setup replaces it after
+                        saving a backup in user_data/strategies/.backup/
   build                 Build the Docker images (gateway + Freqtrade)
   accounts              List your TopstepX accounts and which one the bot uses
 
@@ -36,7 +39,7 @@ Backtesting
                         Run a backtest in the terminal, e.g. 20260901- NoTankAi_TopstepX
 
 Checks
-  test                  Run the gateway and Python unit tests
+  test                  Run the gateway and Python unit tests on the working tree
   config                Validate both compose files and all configs
 
   -h, --help            Show this help
@@ -87,6 +90,44 @@ print_guard() {
   gateway_call GET /guard | "${LIVE[@]}" exec -T projectx-gateway node -e "$node_format"
 }
 
+STRATEGY_FILES=(BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py)
+# Copy each repo strategy into user_data/strategies only when it is missing. An
+# identical file is skipped; a different one is kept (it may hold your edits), unless
+# FORCE=1, which first saves it to user_data/strategies/.backup/<file>.<UTC stamp>.
+sync_strategies() {
+  local f dest stamp
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  for f in "${STRATEGY_FILES[@]}"; do
+    dest="user_data/strategies/$f"
+    if [ ! -f "$dest" ]; then
+      cp "$f" "$dest" && echo "copied $f to user_data/strategies/"
+    elif cmp -s "$f" "$dest"; then
+      echo "up to date: $f"
+    elif [ "${FORCE:-0}" = "1" ]; then
+      mkdir -p user_data/strategies/.backup
+      cp -p "$dest" "user_data/strategies/.backup/$f.$stamp"
+      cp "$f" "$dest"
+      echo "replaced $f (backup: user_data/strategies/.backup/$f.$stamp)"
+    else
+      echo "differs: $f (run FORCE=1 ./topstep setup to replace; a backup is written to user_data/strategies/.backup/$f.<UTC stamp>)"
+    fi
+  done
+}
+# Warn (never fail) when the running setup may not match this checkout: the image
+# bakes in projectx/ at build time, and user_data/strategies holds copies.
+check_drift() {
+  local host_hash image_hash f
+  host_hash=$(find projectx -name '*.py' | LC_ALL=C sort | xargs cat | sha256sum | cut -d' ' -f1)
+  image_hash=$(docker run --rm --entrypoint cat botprimex/freqtrade-projectx:latest /opt/projectx/BUILD_HASH 2>/dev/null || true)
+  if [ -n "$image_hash" ] && [ "$image_hash" != "$host_hash" ]; then
+    echo "warning: the Freqtrade image does not match projectx/ in this checkout. Run: ./topstep build" >&2
+  fi
+  for f in "${STRATEGY_FILES[@]}"; do
+    if [ -f "user_data/strategies/$f" ] && ! cmp -s "$f" "user_data/strategies/$f"; then
+      echo "warning: user_data/strategies/$f differs from the repo copy (FORCE=1 ./topstep setup replaces it, with a backup)" >&2
+    fi
+  done
+}
 cmd_setup() {
   if [ ! -f .env ]; then
     cp .env.example .env
@@ -97,16 +138,17 @@ cmd_setup() {
   else
     echo ".env already exists"
   fi
-  mkdir -p user_data/strategies user_data/logs
+  mkdir -p user_data/strategies user_data/logs user_data/backtest-gateway
   [ -f user_data/config.json ] || { cp config_projectx.example.json user_data/config.json; echo "created user_data/config.json"; }
   [ -f user_data/config-futures-backtest.json ] || { cp config_backtest.example.json user_data/config-futures-backtest.json; echo "created user_data/config-futures-backtest.json"; }
-  cp BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py user_data/strategies/
-  echo "copied strategies to user_data/strategies/"
+  sync_strategies
   chown -R 1000:1000 user_data 2>/dev/null || true
   echo
   bold "Next:"
   echo "  1. Edit .env: PROJECTX_USERNAME, PROJECTX_API_KEY (and PROJECTX_ACCOUNT_ID)"
-  echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance, api_server password"
+  echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance, and the api_server"
+  echo "     password, jwt_secret_key and ws_token (the bot and the backtest web app refuse to start"
+  echo "     with empty or change-me values; user_data/config-futures-backtest.json needs the same)"
   echo "  3. ./topstep build && ./topstep accounts && ./topstep start"
 }
 
@@ -142,14 +184,17 @@ cmd_backtest() {
 }
 
 cmd_test() {
+  # Runs the checked-out sources, not the code baked into the images.
   bold "Gateway tests"
-  docker run --rm -v "$PWD/projectx-gateway/test:/app/test:ro" botprimex/projectx-gateway:latest node --test test/ 2>&1 \
+  docker run --rm \
+    -v "$PWD/projectx-gateway/src:/app/src:ro" \
+    -v "$PWD/projectx-gateway/test:/app/test:ro" \
+    -v "$PWD/tests/fixtures:/tests/fixtures:ro" \
+    "${PX_GATEWAY_IMAGE:-botprimex/projectx-gateway:latest}" node --test test/ 2>&1 \
     | grep -E "^# (tests|pass|fail)|^not ok"
   bold "Python tests"
-  docker run --rm -v "$PWD/tests:/tests:ro" --entrypoint bash botprimex/freqtrade-projectx:latest \
-    -c "pip install --user -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider /tests 2>&1 | tail -1"
+  bash tests/run_python_tests.sh 2>&1 | tail -1
 }
-
 cmd_config() {
   "${LIVE[@]}" config -q && echo "docker-compose.yml ok"
   "${BT[@]}" config -q && echo "docker-compose-webserver.yml ok"
@@ -171,7 +216,11 @@ case "$command" in
   setup) cmd_setup ;;
   build) require_env; "${LIVE[@]}" build ;;
   accounts) require_env; "${LIVE[@]}" run --rm --no-deps projectx-gateway node src/accounts.js 2>&1 | grep -vE "not found, using defaults|Network|Container" ;;
-  start) require_env; [ -f user_data/config.json ] || die "user_data/config.json is missing. Run: ./topstep setup"; "${LIVE[@]}" up -d ;;
+  start)
+    require_env
+    [ -f user_data/config.json ] || die "user_data/config.json is missing. Run: ./topstep setup"
+    check_drift
+    "${LIVE[@]}" up -d ;;
   stop) "${LIVE[@]}" down ;;
   restart) "${LIVE[@]}" restart ;;
   logs)

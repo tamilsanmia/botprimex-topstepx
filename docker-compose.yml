@@ -60,10 +60,12 @@ services:
     networks:
       - backend
       - egress
-    # FreqUI / API on localhost only. From your PC: ssh -L 8001:127.0.0.1:8001 <server>
+    # FreqUI / API on localhost by default. From your PC: ssh -L 8001:127.0.0.1:8001 <server>
+    # FREQTRADE_BIND=0.0.0.0 in .env publishes it on every interface: only do that together
+    # with scripts/ui-firewall.sh, which drops port 8001 except from FREQTRADE_UI_ALLOW.
     # See https://www.freqtrade.io/en/stable/rest-api/
     ports:
-      - "127.0.0.1:8001:8080"
+      - "${FREQTRADE_BIND:-127.0.0.1}:8001:8080"
     # Writes only to user_data (mounted) and /tmp. Checked with `docker run` for
     # trade (dry-run), backtesting and list-exchanges. Freqtrade falls back to
     # `sudo chown` when it cannot create a directory under user_data; that is

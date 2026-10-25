@@ -212,7 +212,8 @@ export class ProjectXClient {
           }
         });
       } catch (err) {
-        if (err.status === 429 && attempt < retries) {
+        // A job shed by our own limiter is overload, not a server 429: retrying would feed it.
+        if (err.status === 429 && !err.shed && attempt < retries) {
           const delay = 1000 * (attempt + 1);
           this.limiter.backoff(path, delay);
           continue;

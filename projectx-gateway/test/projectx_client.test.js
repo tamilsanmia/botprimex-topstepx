@@ -159,6 +159,25 @@ test('reads give up after the retries and surface RateLimitExceeded', async (t) 
   assert.equal(net.to('/api/Position/searchOpen').length, 3, 'first try plus two retries');
 });
 
+test('a request shed by the gateway limiter is not retried and does not pause the bucket', async (t) => {
+  const net = stubFetch(t, (path) => (path === '/api/Auth/loginKey' ? login() : json({})));
+  const limiter = new RateLimiter({ bars_per_30s: 5, other_per_60s: 1, order_reserve: 0, max_queue: 1 });
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const client = makeClient(limiter);
+    // Fill the window and the queue; the next read is rejected by the limiter itself.
+    await client.searchOpenPositions(7);
+    const queued = client.searchOpenPositions(7).catch(() => {});
+    await new Promise((r) => setTimeout(r, 20));
+    await assert.rejects(client.searchOpenPositions(7), (err) => err.status === 429 && err.kind === 'RateLimitExceeded' && err.shed === true);
+    assert.equal(limiter.status().other.throttled429, 0, 'no back-off was requested');
+    assert.equal(net.to('/api/Position/searchOpen').length, 1, 'the shed call never reached the network');
+    void queued;
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
 test('order calls are retried once on 429 and no more', async (t) => {
   const net = stubFetch(t, (path) => (path === '/api/Auth/loginKey' ? login() : json({}, 429)));
   const client = makeClient();

@@ -55,7 +55,8 @@
     "account": "auto",
     "live_data": false,
     // Lower than the live gateway's limits: both share your ProjectX rate limits.
-    "rate_limits": { "bars_per_30s": 30, "other_per_60s": 60 },
+    // No orders go through this gateway, so nothing needs to be reserved for them.
+    "rate_limits": { "bars_per_30s": 30, "other_per_60s": 60, "order_reserve": 0, "max_queue": 500 },
     "ticks": { "record": false },
     // One continuous series per pair across contract rolls. "back" shifts older
     // contracts by the roll gap (no price jumps); "none" keeps raw prices.

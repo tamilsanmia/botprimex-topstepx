@@ -87,7 +87,10 @@
     "account_source": "auto",
     // "auto": adds the account size to an Express Funded Account's $0 balance for sizing.
     "balance_offset": "auto",
-    "rate_limits": { "bars_per_30s": 40, "other_per_60s": 180 },
+    // order_reserve: of the "other" window, the last N requests are kept for orders, so reads
+    // and background syncs cannot starve a stop or an exit. max_queue bounds waiting
+    // non-order requests: the oldest background one is dropped first, then new reads fail.
+    "rate_limits": { "bars_per_30s": 40, "other_per_60s": 180, "order_reserve": 20, "max_queue": 500 },
     "ticks": { "record": true, "retention_days": 30, "pairs": "whitelist" },
     "orderflow": { "block_multiple": 25, "value_area_pct": 70 }
   },

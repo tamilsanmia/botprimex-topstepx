@@ -214,7 +214,7 @@ export function stubGuard({ ok = true, reason = null, maxRisk = 250 } = {}) {
  * made time-independent (weekends allowed, no entry window, overnight hold) so
  * the tests do not depend on when they run.
  */
-export async function makeMockApp({ topstep = {}, gateway = {}, whitelist = ['MES/USD:USD'] } = {}) {
+export async function makeMockApp({ topstep = {}, gateway = {}, whitelist = ['MES/USD:USD'], dataOnly = false } = {}) {
   const tmp = tmpDir('gw-app-');
   const configPath = path.join(tmp.dir, 'config.json');
   writeFileSync(configPath, JSON.stringify({
@@ -233,6 +233,7 @@ export async function makeMockApp({ topstep = {}, gateway = {}, whitelist = ['ME
     GATEWAY_SECRET: SECRET,
     GATEWAY_DATA_DIR: tmp.dir,
     GATEWAY_PORT: '0',
+    ...(dataOnly ? { GATEWAY_DATA_ONLY: '1' } : {}),
   });
   const app = new GatewayApp(cfg);
   await app.start();

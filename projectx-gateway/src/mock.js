@@ -142,6 +142,8 @@ class MockExchange {
     }));
     this.contractsById = new Map(this.contracts.map((c) => [c.id, c]));
     this.orders = new Map();
+    this.brackets = new Map(); // entry order id -> { ticks }
+    this.bracketStops = new Set(); // ids of stops created from a stopLossBracket
     this.positions = new Map();
     this.trades = [];
     this.lastPrices = new Map();
@@ -211,6 +213,41 @@ class MockExchange {
     this.push('GatewayUserOrder', { ...order });
     this.push('GatewayUserPosition', this.positions.get(order.contractId) || { accountId: this.account.id, contractId: order.contractId, size: 0, type: 0, averagePrice: 0 });
     this.push('GatewayUserAccount', { ...this.account });
+
+    if (next === 0) this.cancelBracketStops(order.contractId);
+    const bracket = this.brackets.get(order.id);
+    if (bracket) {
+      this.brackets.delete(order.id);
+      this.createBracketStop(order, price, bracket);
+    }
+  }
+
+  /** A filled entry with stopLossBracket gets its reduce-side stop, like ProjectX's own bracket. */
+  createBracketStop(entry, price, { ticks }) {
+    const spec = SPECS[this.rootOf(entry.contractId)];
+    const buy = entry.side === ORDER_SIDE.BUY;
+    const stopPrice = snap(price + (buy ? -1 : 1) * ticks * spec.tick, spec.tick);
+    const stop = {
+      id: (this.nextId += 1), accountId: this.account.id, contractId: entry.contractId, symbolId: null,
+      creationTimestamp: new Date().toISOString(), updateTimestamp: new Date().toISOString(),
+      status: ORDER_STATUS.OPEN, type: ORDER_TYPE.STOP, side: buy ? ORDER_SIDE.SELL : ORDER_SIDE.BUY, size: entry.size,
+      limitPrice: null, stopPrice, fillVolume: 0, filledPrice: null, customTag: null,
+    };
+    this.orders.set(stop.id, stop);
+    this.bracketStops.add(stop.id);
+    this.push('GatewayUserOrder', { ...stop });
+  }
+
+  /** The bracket is one-cancels-other: once the position is flat its stop goes. */
+  cancelBracketStops(contractId) {
+    for (const id of this.bracketStops) {
+      const o = this.orders.get(id);
+      if (!o || o.contractId !== contractId) continue;
+      this.bracketStops.delete(id);
+      if (o.status !== ORDER_STATUS.OPEN) continue;
+      Object.assign(o, { status: ORDER_STATUS.CANCELLED, updateTimestamp: new Date().toISOString() });
+      this.push('GatewayUserOrder', { ...o });
+    }
   }
 
   onPrice(root, price) {
@@ -237,6 +274,7 @@ class MockExchange {
       customTag: body.customTag ?? null,
     };
     this.orders.set(order.id, order);
+    if (body.stopLossBracket?.ticks >= 1) this.brackets.set(order.id, { ticks: Number(body.stopLossBracket.ticks) });
     this.push('GatewayUserOrder', { ...order });
     const root = this.rootOf(order.contractId);
     const spec = SPECS[root];

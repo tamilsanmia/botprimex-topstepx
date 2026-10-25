@@ -78,6 +78,15 @@
     // "separate": Freqtrade's own stop order. "native": also attach a stopLossBracket
     // sized to max_risk_per_trade (account must be in Auto OCO Brackets mode).
     "brackets": "separate",
+    // Who makes sure an open position has a stop (watched every 2 s, needs topstep.protection.max_risk_per_trade):
+    //   "gateway": Freqtrade's own stop (stoploss_on_exchange) is the normal path. If a position still has no
+    //              working stop after grace_secs the gateway places one at max_risk_per_trade distance, and
+    //              flattens the position when it cannot, or when none is working after flatten_after_secs.
+    //              Entries the gateway could not protect (risk under one tick for the size, unknown tick
+    //              value, user hub down) are refused.
+    //   "native":  attach a stopLossBracket to every entry, nothing else (as brackets "native").
+    //   "off":     no gateway stop and no flatten.
+    "protective_stop": { "mode": "gateway", "grace_secs": 10, "flatten_after_secs": 30 },
     "reconcile_secs": 30,
     "flatten_grace_secs": 30,
     "backfill_candles": 1500,

@@ -23,6 +23,8 @@ import { UserStream } from './userStream.js';
 
 const GUARD_THROTTLE_MS = 200;
 const HISTORY_DAYS = 90;
+const PROTECT_INTERVAL_MS = 2000;
+const STOP_MODES = ['gateway', 'native', 'off'];
 const SNAPSHOT_LIMITS = Object.freeze({ positions: 100, closedResults: 5000, pairLength: 40 });
 
 export class StartupError extends Error {}
@@ -31,6 +33,14 @@ export class StartupError extends Error {}
 export function assertStartable(cfg) {
   if (!cfg.secret && !cfg.mock) {
     throw new StartupError('GATEWAY_SECRET is empty. The gateway can place orders on a real account, so it refuses to start without a shared secret (generate one with: openssl rand -hex 32). Only PROJECTX_MOCK=1 may run without one.');
+  }
+  const ps = cfg.gateway?.protective_stop;
+  if (ps) {
+    const problems = [];
+    if (!STOP_MODES.includes(ps.mode)) problems.push(`protective_stop.mode must be one of ${STOP_MODES.join(', ')}, got ${JSON.stringify(ps.mode)}`);
+    if (!(Number(ps.grace_secs) >= 0)) problems.push('protective_stop.grace_secs must be >= 0');
+    if (!(Number(ps.flatten_after_secs) > Number(ps.grace_secs))) problems.push('protective_stop.flatten_after_secs must be greater than grace_secs');
+    if (problems.length) throw new StartupError(`Invalid projectx_gateway config: ${problems.join('; ')}`);
   }
   if (cfg.mock && cfg.dryRun === false) {
     throw new StartupError('PROJECTX_MOCK=1 with dry_run=false: mock fills are synthetic, so Freqtrade would trade live on made-up prices. Set dry_run to true or unset PROJECTX_MOCK.');
@@ -260,6 +270,7 @@ export class GatewayApp {
       guard: this.guard ? () => this.guard : null,
       config: cfg.gateway,
       notify: this.notify,
+      dataOnly: cfg.dataOnly,
     });
     this.user.on('orphan-cancelled', (o, reason) => this.notify(`cancelled orphan protective order ${o.id} (${reason})`));
     if (!cfg.dataOnly) {
@@ -269,6 +280,7 @@ export class GatewayApp {
 
       this.guardTimer = setInterval(() => this.evaluateGuard(), 1000);
       this.guardTimer.unref?.();
+      this.startProtectiveStop();
     }
     this.rollTimer = setInterval(() => this.checkRolls().catch((err) => console.warn(`[gateway] roll check failed: ${err.message}`)), 10 * 60 * 1000);
     this.rollTimer.unref?.();
@@ -326,6 +338,21 @@ export class GatewayApp {
     this.evaluateGuard();
   }
 
+  /** Watchdog that gives every real position a stop (protective_stop.mode "gateway"). */
+  startProtectiveStop() {
+    const ps = this.router_.protectiveStop();
+    if (ps.mode !== 'gateway' || this.guardSource !== 'projectx') return;
+    if (!this.router_.maxRisk()) {
+      console.warn('[gateway] protective_stop is "gateway" but topstep.protection.max_risk_per_trade is off: the gateway cannot size a stop, so it will neither place stops nor refuse entries');
+      return;
+    }
+    console.log(`[gateway] protective stop: stop after ${ps.grace_secs}s without one, flatten after ${ps.flatten_after_secs}s`);
+    this.protectTimer = setInterval(() => {
+      this.router_.protectPositions().catch((err) => console.warn(`[gateway] protective stop check failed: ${err.message}`));
+    }, PROTECT_INTERVAL_MS);
+    this.protectTimer.unref?.();
+  }
+
   scheduleGuard() {
     if (this.guardPending) return;
     this.guardPending = setTimeout(() => {
@@ -344,7 +371,7 @@ export class GatewayApp {
         balance: this.user.account.balance,
         unrealized: this.router_.unrealized(),
         ...summarizeFills([...this.user.trades.values()], this.guard.clock.sessionStart(now)),
-        legs: this.router_.legs(),
+        legs: this.router_.legs({ reserved: false }),
       };
     }
     const s = this.snapshot;
@@ -535,6 +562,7 @@ export class GatewayApp {
     if (this.stopped) return;
     this.stopped = true;
     clearInterval(this.guardTimer);
+    clearInterval(this.protectTimer);
     clearInterval(this.rollTimer);
     await Promise.allSettled([this.market?.stop(), this.user?.stop()]);
     this.store?.close();

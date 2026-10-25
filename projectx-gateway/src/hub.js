@@ -15,7 +15,7 @@ const REBUILD_STEPS_MS = [2000, 5000, 10000, 30000];
  * to the URL as well yields a duplicated access_token that the gateway rejects.
  */
 export class ManagedHub {
-  constructor({ name, url, tokenFactory, handlers, onReady, onState, factory }) {
+  constructor({ name, url, tokenFactory, handlers, onReady, onState, factory, rebuildStepsMs = REBUILD_STEPS_MS }) {
     this.name = name;
     this.url = url;
     this.tokenFactory = tokenFactory;
@@ -23,6 +23,7 @@ export class ManagedHub {
     this.onReady = onReady;
     this.onState = onState || (() => {});
     this.factory = factory || ((opts) => buildSignalR(opts));
+    this.rebuildStepsMs = rebuildStepsMs;
     this.connection = null;
     this.state = 'idle';
     this.rebuildAttempt = 0;
@@ -96,7 +97,7 @@ export class ManagedHub {
 
   scheduleRebuild() {
     if (this.rebuildTimer || this.stopping) return;
-    const delay = REBUILD_STEPS_MS[Math.min(this.rebuildAttempt, REBUILD_STEPS_MS.length - 1)];
+    const delay = this.rebuildStepsMs[Math.min(this.rebuildAttempt, this.rebuildStepsMs.length - 1)];
     this.rebuildAttempt += 1;
     this.rebuildTimer = setTimeout(() => {
       this.rebuildTimer = null;

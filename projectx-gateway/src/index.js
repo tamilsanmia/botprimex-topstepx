@@ -422,6 +422,8 @@ export class GatewayApp {
   }
 
   async stop() {
+    if (this.stopped) return;
+    this.stopped = true;
     clearInterval(this.guardTimer);
     clearInterval(this.rollTimer);
     await Promise.allSettled([this.market?.stop(), this.user?.stop()]);

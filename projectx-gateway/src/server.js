@@ -172,6 +172,6 @@ export function createServer(app, { secret, port }) {
     }
   };
 
-  server.listen(port, '0.0.0.0', () => console.log(`[server] listening on :${port}`));
-  return { server, wss, broadcast };
+  server.listen(port, '0.0.0.0', () => console.log(`[server] listening on :${server.address().port}`));
+  return { server, wss, broadcast, address: () => server.address() };
 }

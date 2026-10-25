@@ -53,7 +53,7 @@ export const PRESETS = Object.freeze({
 const FUNDED_DEFAULTS = {
   profit_target: null, daily_loss_limit: null, max_loss_limit: null,
   max_loss_type: 'trailing_eod', daily_loss_type: 'intraday', mll_lock_balance: 0,
-  consistency_pct: null, max_mini_equivalent: null, stop_on_target: false, scaling_plan: null,
+  consistency_pct: null, consistency_mode: 'cap_day', max_mini_equivalent: null, stop_on_target: false, scaling_plan: null,
   payout: { min_winning_days: 5, min_winning_day_amount: 150 },
 };
 
@@ -61,11 +61,20 @@ const PHASE_DEFAULTS = Object.freeze({
   evaluation: {
     profit_target: null, daily_loss_limit: null, max_loss_limit: null,
     max_loss_type: 'trailing_eod', daily_loss_type: 'intraday', mll_lock_balance: null,
-    consistency_pct: 55, max_mini_equivalent: null, stop_on_target: true, scaling_plan: null, payout: null,
+    consistency_pct: 55, consistency_mode: 'cap_day', max_mini_equivalent: null, stop_on_target: true, scaling_plan: null, payout: null,
   },
   funded: FUNDED_DEFAULTS,
   live_funded: { ...FUNDED_DEFAULTS },
 });
+
+/**
+ * How the consistency target is applied (it needs consistency_pct and a profit_target):
+ *   cap_day       entries stop for the day once its P&L reaches pct x profit_target, so the
+ *                 best day never exceeds the target and the profit target never rises.
+ *   raise_target  Topstep's own rule: no cap, the profit target rises to bestDay / pct.
+ *   off           consistency is ignored.
+ */
+export const CONSISTENCY_MODES = Object.freeze(['cap_day', 'raise_target', 'off']);
 
 export const SESSION_DEFAULTS = Object.freeze({
   reset_time: '18:00', eod_time: '16:10', no_entry_before: '18:05', no_entry_after: '15:45',
@@ -188,7 +197,10 @@ function validate({ rules, session, protection, lots, timezone, problems }) {
   if (rules.mll_lock_balance !== null && rules.mll_lock_balance !== undefined && !Number.isFinite(Number(rules.mll_lock_balance))) {
     problems.push(`mll_lock_balance must be a number or null, got ${rules.mll_lock_balance}`);
   }
-  if (rules.consistency_pct && !rules.profit_target) {
+  if (!CONSISTENCY_MODES.includes(rules.consistency_mode)) {
+    problems.push(`consistency_mode must be ${CONSISTENCY_MODES.join(', ')}, got "${rules.consistency_mode}"`);
+  }
+  if (rules.consistency_pct && rules.consistency_mode !== 'off' && !rules.profit_target) {
     problems.push('consistency_pct needs a profit_target to size the daily cap');
   }
   if (Array.isArray(rules.scaling_plan)) {

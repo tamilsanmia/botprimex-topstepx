@@ -330,8 +330,14 @@ export class AccountGuard extends EventEmitter {
 
     const pastDays = Object.entries(s.days).filter(([k]) => k !== day.key).map(([, d]) => d.pnl);
     const bestDay = Math.max(dayRealized, ...pastDays, 0);
-    const consistencyCap = r.consistency_pct && r.profit_target ? (r.consistency_pct / 100) * r.profit_target : null;
-    const consistencyOk = !r.consistency_pct || totalProfit <= 0 || bestDay <= (r.consistency_pct / 100) * totalProfit;
+    // cap_day stops entries for the day at pct x target; raise_target has no cap and lifts the target to
+    // bestDay / pct instead (Topstep's rule); off ignores consistency. A pass needs totalProfit >= effectiveTarget
+    // in cap_day too, which is the same as the best day staying within pct of the total profit.
+    const mode = r.consistency_mode || 'cap_day';
+    const pct = mode !== 'off' && r.consistency_pct ? r.consistency_pct / 100 : null;
+    const consistencyCap = mode === 'cap_day' && pct && r.profit_target ? pct * r.profit_target : null;
+    const consistencyOk = !pct || totalProfit <= 0 || bestDay <= pct * totalProfit;
+    const effectiveTarget = r.profit_target ? Math.max(r.profit_target, pct ? bestDay / pct : 0) : null;
 
     const lastEod = s.lastEodKey ? s.days[s.lastEodKey]?.balanceEod : null;
     const scalingProfit = (Number.isFinite(lastEod) ? lastEod : balance) - this.start;
@@ -353,8 +359,11 @@ export class AccountGuard extends EventEmitter {
       this.lockAccount('mll_buffer', `equity ${round2(equity)} is ${round2(mllRoom)} above the MLL floor ${round2(floor)} (buffer ${p.mll_buffer})`, reasons);
       dirty = true;
     }
-    if (r.profit_target && r.stop_on_target && totalProfit >= r.profit_target && consistencyOk) {
-      this.lockAccount('target_passed', `profit ${round2(totalProfit)} reached target ${r.profit_target} with consistency met`, reasons);
+    if (r.profit_target && r.stop_on_target && totalProfit >= effectiveTarget) {
+      const detail = effectiveTarget > r.profit_target
+        ? `profit ${round2(totalProfit)} reached the raised target ${round2(effectiveTarget)} (best day ${round2(bestDay)})`
+        : `profit ${round2(totalProfit)} reached target ${r.profit_target} with consistency met`;
+      this.lockAccount('target_passed', detail, reasons);
       dirty = true;
     }
 
@@ -419,8 +428,10 @@ export class AccountGuard extends EventEmitter {
         mllRoom: round2(mllRoom),
         highWater: round2(hwm),
         profitTarget: r.profit_target ?? null,
-        targetProgressPct: r.profit_target ? round2((totalProfit / r.profit_target) * 100) : null,
+        effectiveTarget: round2(effectiveTarget),
+        targetProgressPct: effectiveTarget ? round2((totalProfit / effectiveTarget) * 100) : null,
         consistencyPct: r.consistency_pct ?? null,
+        consistencyMode: mode,
         consistencyCap: round2(consistencyCap),
         consistencyOk,
         bestDay: round2(bestDay),

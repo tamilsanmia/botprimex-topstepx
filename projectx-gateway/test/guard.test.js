@@ -111,6 +111,75 @@ test('consistency: daily cap blocks entries and a pass needs best day <= 55% of 
   assert.ok(codes(passed).includes('target_passed'));
 });
 
+const consistencyGuard = (mode) => makeGuard({
+  protection: { daily_profit_lock: { enabled: false }, mll_buffer: 0 },
+  phases: { evaluation: { consistency_mode: mode } },
+});
+
+test('consistency_mode cap_day (default): the day is capped and a pass needs the best day within 55% of profit', () => {
+  const g = consistencyGuard(undefined);
+  assert.equal(g.rules.consistency_mode, 'cap_day');
+  const capped = g.evaluate({ ...base, now: et(20, 11), balance: 51700, dayRealized: 1700 });
+  assert.ok(codes(capped).includes('consistency_cap'));
+  assert.equal(capped.metrics.consistencyMode, 'cap_day');
+  assert.equal(capped.metrics.consistencyCap, 1650);
+
+  g.state.days = { '2026-10-19': { pnl: 2000, balanceEod: 52000 } };
+  const short = g.evaluate({ ...base, now: et(21, 11), balance: 53100, dayRealized: 1100 });
+  assert.equal(short.metrics.effectiveTarget, 3636.36);
+  assert.notEqual(short.status, STATUS.ACCOUNT_LOCKED);
+  const done = g.evaluate({ ...base, now: et(21, 12), balance: 53640, dayRealized: 1640 });
+  assert.ok(codes(done).includes('target_passed'));
+});
+
+test('consistency_mode raise_target: no daily cap, the target rises to bestDay / pct', () => {
+  const g = consistencyGuard('raise_target');
+  const day = g.evaluate({ ...base, now: et(20, 11), balance: 51700, dayRealized: 1700 });
+  assert.ok(!codes(day).includes('consistency_cap'), 'no cap in this mode');
+  assert.equal(day.status, STATUS.ACTIVE);
+  assert.equal(day.metrics.consistencyCap, null);
+  assert.equal(day.metrics.effectiveTarget, 3090.91, '1700 / 0.55');
+
+  const short = g.evaluate({ ...base, now: et(20, 12), balance: 53050, dayRealized: 3050 });
+  assert.equal(short.metrics.effectiveTarget, 5545.45);
+  assert.notEqual(short.status, STATUS.ACCOUNT_LOCKED, 'past the plain 3000 target but below the raised one');
+
+  const small = consistencyGuard('raise_target');
+  const normal = small.evaluate({ ...base, now: et(20, 11), balance: 51000, dayRealized: 1000 });
+  assert.equal(normal.metrics.effectiveTarget, 3000, 'a modest best day leaves the target alone');
+  small.state.days = { '2026-10-19': { pnl: 1000, balanceEod: 51000 }, '2026-10-20': { pnl: 1000, balanceEod: 52000 } };
+  const pass = small.evaluate({ ...base, now: et(21, 11), balance: 53000, dayRealized: 1000 });
+  assert.equal(pass.status, STATUS.ACCOUNT_LOCKED);
+  assert.match(pass.reasons.find((x) => x.code === 'target_passed').detail, /reached target 3000/);
+
+  const raised = consistencyGuard('raise_target');
+  raised.state.days = { '2026-10-19': { pnl: 2000, balanceEod: 52000 } };
+  assert.notEqual(raised.evaluate({ ...base, now: et(21, 11), balance: 53100, dayRealized: 1100 }).status, STATUS.ACCOUNT_LOCKED);
+  const hit = raised.evaluate({ ...base, now: et(21, 12), balance: 53640, dayRealized: 1640 });
+  assert.equal(hit.status, STATUS.ACCOUNT_LOCKED);
+  assert.match(hit.reasons.find((x) => x.code === 'target_passed').detail, /raised target 3636\.36/);
+});
+
+test('consistency_mode off: neither the cap nor the best-day condition applies', () => {
+  const g = consistencyGuard('off');
+  const day = g.evaluate({ ...base, now: et(20, 11), balance: 51900, dayRealized: 1900 });
+  assert.ok(!codes(day).includes('consistency_cap'));
+  assert.equal(day.metrics.consistencyOk, true);
+  g.state.days = { '2026-10-19': { pnl: 2500, balanceEod: 52500 } };
+  const passed = g.evaluate({ ...base, now: et(21, 11), balance: 53000, dayRealized: 500 });
+  assert.equal(passed.metrics.effectiveTarget, 3000);
+  assert.ok(codes(passed).includes('target_passed'), 'a lopsided best day does not stop the pass');
+});
+
+test('consistency_mode is validated', () => {
+  assert.throws(
+    () => resolveRules({ phase: 'evaluation', preset: '50k', phases: { evaluation: { consistency_mode: 'strict' } } }, null),
+    /consistency_mode must be cap_day, raise_target, off, got "strict"/,
+  );
+  const off = resolveRules({ phase: 'evaluation', preset: '50k', phases: { evaluation: { consistency_mode: 'off', profit_target: null } } }, null);
+  assert.equal(off.rules.consistency_mode, 'off');
+});
+
 test('funded scaling plan uses the last EOD balance', () => {
   const g = makeGuard({}, { name: '50KXFA-1', kind: 'XFA', sizeUsd: 50000 });
   assert.equal(g.evaluate({ ...base, balance: 0, now: et(20, 10) }).metrics.maxMiniEquivalent, 2);

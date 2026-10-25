@@ -136,7 +136,12 @@
       "evaluation": {
         "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
         "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": null,
-        "session": {}, "consistency_pct": 55, "max_mini_equivalent": null, "stop_on_target": true
+        // consistency_pct: Topstep's consistency target, 55 (0 = off).
+        // consistency_mode: "cap_day" (default, cautious) stops entries for the day at pct x profit_target
+        // ($1,650 on 50K) so the target never rises; "raise_target" is Topstep's own rule (no cap, the
+        // profit target rises to best day / pct); "off" ignores consistency.
+        "session": {}, "consistency_pct": 55, "consistency_mode": "cap_day",
+        "max_mini_equivalent": null, "stop_on_target": true
       },
       "funded": {
         "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,

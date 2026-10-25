@@ -95,15 +95,16 @@ test('static floor never moves; lock balance caps the trailing floor', () => {
   assert.equal(res.metrics.mllFloor, 0, 'capped at mll_lock_balance');
 });
 
-test('consistency: daily cap blocks entries and a pass needs best day <= 50% of profit', () => {
+test('consistency: daily cap blocks entries and a pass needs best day <= 55% of profit', () => {
   const g = makeGuard({ protection: { daily_profit_lock: { enabled: false }, mll_buffer: 0 } });
-  const capped = g.evaluate({ ...base, now: et(20, 11), balance: 51500, dayRealized: 1500 });
+  const capped = g.evaluate({ ...base, now: et(20, 11), balance: 51700, dayRealized: 1700 });
   assert.ok(codes(capped).includes('consistency_cap'));
+  assert.equal(capped.metrics.consistencyCap, 1650);
 
   const g2 = makeGuard();
   g2.state.days = { '2026-10-19': { pnl: 2000, balanceEod: 52000 } };
   const notYet = g2.evaluate({ ...base, now: et(20, 11), balance: 53100, dayRealized: 1100 });
-  assert.notEqual(notYet.status, STATUS.ACCOUNT_LOCKED, 'best day 2000 > 50% of 3100');
+  assert.notEqual(notYet.status, STATUS.ACCOUNT_LOCKED, 'best day 2000 > 55% of 3100');
   assert.equal(notYet.metrics.consistencyOk, false);
   const passed = g2.evaluate({ ...base, now: et(20, 11, 30), balance: 54100, dayRealized: 1100 });
   assert.equal(passed.status, STATUS.ACCOUNT_LOCKED);

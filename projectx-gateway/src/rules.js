@@ -4,9 +4,12 @@ import { parseDays, parseHHMM } from './session.js';
  * Topstep presets per account size.
  *
  * Starting points only: Topstep revises these, and the gateway API exposes none
- * of them, so every value can be overridden in the `topstep` config block. The
- * evaluation figures match Topstep's published Trading Combine parameters; the
- * funded scaling tiers in particular must be checked against your dashboard.
+ * of them, so every value can be overridden in the `topstep` config block.
+ * docs/topstep-rules-sources.md lists each value with its source, the date it
+ * was checked and whether it could be verified. Verified: DLL, MLL, the 5/10/15
+ * mini caps and the 55% consistency target. Only secondary sources agree on the
+ * profit targets and the 50K scaling tiers; the 100K and 150K funded tiers are
+ * unverified, so check them against your dashboard.
  */
 export const PRESETS = Object.freeze({
   50000: {
@@ -58,7 +61,7 @@ const PHASE_DEFAULTS = Object.freeze({
   evaluation: {
     profit_target: null, daily_loss_limit: null, max_loss_limit: null,
     max_loss_type: 'trailing_eod', daily_loss_type: 'intraday', mll_lock_balance: null,
-    consistency_pct: 50, max_mini_equivalent: null, stop_on_target: true, scaling_plan: null, payout: null,
+    consistency_pct: 55, max_mini_equivalent: null, stop_on_target: true, scaling_plan: null, payout: null,
   },
   funded: FUNDED_DEFAULTS,
   live_funded: { ...FUNDED_DEFAULTS },

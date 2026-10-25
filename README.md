@@ -123,7 +123,7 @@ Check these against your Topstep dashboard, because Topstep changes them from ti
 * **Loss limit timing**:
   * `max_loss_type`: `trailing_eod` (Topstep's default), `trailing_intraday` or `static`.
   * `daily_loss_type`: `intraday` (realized plus open P&L) or `eod` (realized only).
-* **Consistency**: `consistency_pct` (50 in evaluation) caps any single day's profit.
+* **Consistency**: `consistency_pct` (55 in evaluation, Topstep's published consistency target) caps any single day's profit.
 * **Lots**: a micro counts as 1/10 of a mini. Holding a mini and its micro together (ES with MES, NQ with MNQ, CL with MCL) is blocked.
 
 ## Account protection

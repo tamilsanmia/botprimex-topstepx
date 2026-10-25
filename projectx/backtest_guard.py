@@ -49,7 +49,7 @@ PRESETS = {
     },
 }
 PHASE_DEFAULTS = {
-    "evaluation": {"max_loss_type": "trailing_eod", "mll_lock_balance": None, "consistency_pct": 50, "stop_on_target": True},
+    "evaluation": {"max_loss_type": "trailing_eod", "mll_lock_balance": None, "consistency_pct": 55, "stop_on_target": True},
     "funded": {"max_loss_type": "trailing_eod", "mll_lock_balance": 0, "consistency_pct": None, "stop_on_target": False},
 }
 PHASE_DEFAULTS["live_funded"] = dict(PHASE_DEFAULTS["funded"])

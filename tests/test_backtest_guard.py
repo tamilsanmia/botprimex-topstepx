@@ -91,7 +91,7 @@ def test_counters_and_consistency_cap():
     assert "max_trades_per_day" in codes(g.evaluate(et(20, 11), [], 10))
     losses = [(et(20, 9, i), -10.0) for i in range(3)]
     assert "max_consecutive_losses" in codes(g.evaluate(et(20, 11), losses, 3))
-    assert "consistency_cap" in codes(g.evaluate(et(20, 11), [(et(20, 10), 1600.0)], 1))
+    assert "consistency_cap" in codes(g.evaluate(et(20, 11), [(et(20, 10), 1700.0)], 1))
 
 
 def test_funded_scaling_uses_last_eod_balance():

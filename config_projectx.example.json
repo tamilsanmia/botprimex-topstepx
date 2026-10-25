@@ -136,7 +136,7 @@
       "evaluation": {
         "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
         "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": null,
-        "session": {}, "consistency_pct": 50, "max_mini_equivalent": null, "stop_on_target": true
+        "session": {}, "consistency_pct": 55, "max_mini_equivalent": null, "stop_on_target": true
       },
       "funded": {
         "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,

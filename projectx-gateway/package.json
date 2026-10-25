@@ -16,6 +16,6 @@
   "dependencies": {
     "@microsoft/signalr": "10.0.11",
     "better-sqlite3": "12.4.1",
-    "ws": "8.18.3"
+    "ws": "^8.22.0"
   }
 }

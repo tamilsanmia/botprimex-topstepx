@@ -29,6 +29,7 @@ import pandas as pd
 import talib.abstract as ta
 from pandas import DataFrame
 
+from freqtrade.enums import ExitCheckTuple, ExitType
 from freqtrade.persistence import LocalTrade, Order, Trade
 from freqtrade.strategy import stoploss_from_absolute
 
@@ -474,8 +475,8 @@ class TopstepXMixin:
             return None
         return self._stake_for(trade.pair, add, current_entry_rate, trade.leverage)
 
-    def custom_exit(self, pair: str, trade: Trade, current_time: datetime, current_rate: float,
-                    current_profit: float, **kwargs) -> Optional[str]:
+    def _protection_exit_reason(self, pair: str, trade: Trade | None = None) -> str | None:
+        """Why the account or the contract requires this position closed now, if it does."""
         if self._guard.get("flatten"):
             reasons = self._guard.get("flattenReasons") or []
             if any(r in ("day_locked", "account_locked") for r in reasons):
@@ -484,6 +485,27 @@ class TopstepXMixin:
         days = self._market(pair).get("daysToExpiry")
         if not self._backtesting and days is not None and days < 0:
             return "contract_roll"
+        return None
+
+    def should_exit(self, trade: Trade, rate: float, current_time: datetime, *, enter: bool, exit_: bool,
+                    low: Optional[float] = None, high: Optional[float] = None,
+                    force_stoploss: float = 0) -> list[ExitCheckTuple]:
+        exits = super().should_exit(trade, rate, current_time, enter=enter, exit_=exit_, low=low, high=high,
+                                    force_stoploss=force_stoploss)
+        reason = self._protection_exit_reason(trade.pair, trade)
+        if not reason:
+            return exits
+        # Freqtrade skips custom_exit while an exit signal is active, and an exit signal can be vetoed
+        # by exit_profit_only on a losing trade. Both would leave the position open through a flatten.
+        # Callers try the exits in list order, so the protection exit goes first.
+        protection = ExitCheckTuple(exit_type=ExitType.CUSTOM_EXIT, exit_reason=reason)
+        return [protection] + [e for e in exits if e != protection]
+
+    def custom_exit(self, pair: str, trade: Trade, current_time: datetime, current_rate: float,
+                    current_profit: float, **kwargs) -> Optional[str]:
+        reason = self._protection_exit_reason(pair, trade)
+        if reason:
+            return reason
         if self.tsx_of["enabled"] and self.tsx_of["cvd_divergence_exit"] and self._cvd_divergence(pair, trade):
             return "cvd_divergence"
         return super().custom_exit(pair, trade, current_time, current_rate, current_profit, **kwargs)

@@ -46,6 +46,11 @@ test('/status exposes hub states, message ages, reconcile age and data health', 
   assert.deepEqual(res.body.dataHealth, { ok: true, reasons: [] });
 });
 
+test('the user stream prunes only once the guard has rebuilt its history', () => {
+  assert.equal(env.app.user.pruneArmed, true);
+  assert.deepEqual(env.app.user.retention, { orders_days: 2, trades_days: 14 });
+});
+
 test('data health reports a stale quote and the guard blocks entries on it', async () => {
   const { app } = env;
   app.market.quoteSince = () => Date.now() - 20_000;

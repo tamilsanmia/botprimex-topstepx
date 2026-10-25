@@ -518,3 +518,147 @@ test('status reports how long ago the last successful reconcile was', async () =
   const age = user.status().reconcileAgeMs;
   assert.ok(age >= 0 && age < 1000);
 });
+
+/* ------------------------------------------------------ pruning and indexing -- */
+
+const DAY = 24 * 60 * 60 * 1000;
+const daysAgo = (n, now = Date.now()) => new Date(now - n * DAY).toISOString();
+
+test('prune drops finished orders older than orders_days and keeps working and recent ones', () => {
+  const { user } = setup();
+  user.onOrder(orderRow('MES', { id: 1, status: ORDER_STATUS.FILLED, creationTimestamp: daysAgo(5), updateTimestamp: daysAgo(5) }));
+  user.onOrder(orderRow('MES', { id: 2, status: ORDER_STATUS.CANCELLED, creationTimestamp: daysAgo(3), updateTimestamp: daysAgo(3) }));
+  user.onOrder(orderRow('MES', { id: 3, status: ORDER_STATUS.FILLED, creationTimestamp: daysAgo(1), updateTimestamp: daysAgo(1) }));
+  user.onOrder(orderRow('MES', { id: 4, status: ORDER_STATUS.OPEN, creationTimestamp: daysAgo(30), updateTimestamp: daysAgo(30) }));
+  user.onOrder(orderRow('MES', { id: 5, status: ORDER_STATUS.REJECTED, creationTimestamp: daysAgo(10), updateTimestamp: null }));
+  user.onOrder(orderRow('MES', { id: 6, status: ORDER_STATUS.FILLED, creationTimestamp: 'garbage', updateTimestamp: undefined }));
+
+  const dropped = user.prune();
+
+  assert.deepEqual([...user.orders.keys()].sort(), [3, 4, 6]);
+  assert.equal(dropped.orders, 3);
+  assert.deepEqual(user.openOrders().map((o) => o.id), [4], 'a working order is kept however old it is');
+});
+
+test('prune drops fills older than trades_days and keeps the index in step', () => {
+  const { user } = setup();
+  user.onTrade(tradeRow('MES', { id: 1, orderId: 10, creationTimestamp: daysAgo(20) }));
+  user.onTrade(tradeRow('MES', { id: 2, orderId: 10, creationTimestamp: daysAgo(20) }));
+  user.onTrade(tradeRow('MES', { id: 3, orderId: 11, creationTimestamp: daysAgo(20) }));
+  user.onTrade(tradeRow('MES', { id: 4, orderId: 11, creationTimestamp: daysAgo(1) }));
+  user.onTrade(tradeRow('MES', { id: 5, orderId: 12, creationTimestamp: daysAgo(13) }));
+
+  const dropped = user.prune();
+
+  assert.equal(dropped.trades, 3);
+  assert.deepEqual([...user.trades.keys()].sort(), [4, 5]);
+  assert.deepEqual(user.tradesForOrder(10), [], 'an order whose fills all went has no index entry');
+  assert.equal(user.tradesByOrder.has(10), false);
+  assert.deepEqual(user.tradesForOrder(11).map((t) => t.id), [4]);
+  assert.deepEqual(user.tradesForOrder(12).map((t) => t.id), [5]);
+});
+
+test('retention comes from the constructor and falls back to 2 and 14 days', () => {
+  const client = fakeClient();
+  const make = (retention) => new UserStream({ client, url: 'u', tokenFactory: () => 't', hubFactory: () => ({}), retention });
+  assert.deepEqual(make(undefined).retention, { orders_days: 2, trades_days: 14 });
+  assert.deepEqual(make({ orders_days: 0, trades_days: 'x' }).retention, { orders_days: 2, trades_days: 14 });
+  assert.deepEqual(make({ orders_days: 7, trades_days: 30 }).retention, { orders_days: 7, trades_days: 30 });
+
+  const wide = make({ orders_days: 7, trades_days: 30 });
+  wide.account = { id: 7 };
+  wide.onOrder(orderRow('MES', { id: 1, status: ORDER_STATUS.FILLED, creationTimestamp: daysAgo(5), updateTimestamp: daysAgo(5) }));
+  wide.onTrade(tradeRow('MES', { id: 1, creationTimestamp: daysAgo(20) }));
+  wide.prune();
+  assert.ok(wide.orders.has(1) && wide.trades.has(1));
+});
+
+test('tradesForOrder is served by the index and returns what the old scan returned', () => {
+  const { user } = setup();
+  const rows = [];
+  for (let i = 1; i <= 200; i += 1) rows.push(tradeRow('MES', { id: i, orderId: i % 20, voided: i % 7 === 0 }));
+  rows.forEach((r) => user.onTrade(r));
+
+  for (let order = 0; order < 20; order += 1) {
+    const scan = rows.filter((t) => t.orderId === order && !t.voided).map((t) => t.id);
+    assert.deepEqual(user.tradesForOrder(order).map((t) => t.id).sort((a, b) => a - b), scan, `order ${order}`);
+  }
+  assert.equal(user.tradesByOrder.size, 20);
+});
+
+test('a trade re-sent with the same id replaces itself in the index, also when its order changes', () => {
+  const { user } = setup();
+  user.onTrade(tradeRow('MES', { id: 1, orderId: 10, size: 1 }));
+  user.onTrade(tradeRow('MES', { id: 1, orderId: 10, size: 2 }));
+  assert.deepEqual(user.tradesForOrder(10).map((t) => t.size), [2], 'no duplicate');
+  user.onTrade(tradeRow('MES', { id: 1, orderId: 11, size: 2 }));
+  assert.deepEqual(user.tradesForOrder(10), []);
+  assert.equal(user.tradesForOrder(11).length, 1);
+  assert.equal(user.tradesByOrder.has(10), false);
+});
+
+test('fills loaded at start and fills without an order id are indexed or skipped correctly', async (t) => {
+  quiet(t);
+  const client = fakeClient();
+  client.searchTrades = async () => [tradeRow('MES', { id: 1, orderId: 5 }), tradeRow('MES', { id: 2, orderId: null })];
+  const user = new UserStream({ client, url: 'u', tokenFactory: () => 't', hubFactory: () => ({}) });
+  user.account = { id: 7 };
+  await user.loadHistory(0);
+  assert.deepEqual(user.tradesForOrder(5).map((x) => x.id), [1]);
+  assert.equal(user.trades.size, 2);
+  assert.equal(user.tradesByOrder.size, 1);
+});
+
+test('prune drops strike counters and empty waiter lists of orders that are gone', () => {
+  const { user } = setup();
+  user.onOrder(orderRow('MES', { id: 1, status: ORDER_STATUS.OPEN }));
+  user.onOrder(orderRow('MES', { id: 2, status: ORDER_STATUS.FILLED }));
+  user.strikes.set(1, 1);
+  user.strikes.set(2, 1);
+  user.strikes.set(99, 1);
+  user.waiters.set(1, [() => {}]);
+  user.waiters.set(2, []);
+  user.prune();
+  assert.deepEqual([...user.strikes.keys()], [1], 'only the strike on a still-working order is kept');
+  assert.deepEqual([...user.waiters.keys()], [1]);
+});
+
+test('pruning waits for armPruning(), then runs after every reconcile', async () => {
+  const { client, user } = setup();
+  client.orderRows = [];
+  user.onOrder(orderRow('MES', { id: 1, status: ORDER_STATUS.FILLED, creationTimestamp: daysAgo(9), updateTimestamp: daysAgo(9) }));
+  user.onTrade(tradeRow('MES', { id: 1, creationTimestamp: daysAgo(60) }));
+
+  await user.reconcile();
+  assert.equal(user.orders.size + user.trades.size, 2, 'nothing is pruned before the guard has used the history');
+
+  user.armPruning();
+  assert.equal(user.orders.size + user.trades.size, 0, 'arming prunes right away');
+
+  user.onTrade(tradeRow('MES', { id: 2, creationTimestamp: daysAgo(40) }));
+  await user.reconcile();
+  assert.equal(user.trades.size, 0, 'and every reconcile prunes again');
+});
+
+test('memory stays bounded: 10k synthetic fills over 40 days leave only the retained window', () => {
+  const { user } = setup();
+  const now = Date.now();
+  for (let i = 0; i < 10_000; i += 1) {
+    const age = (i / 10_000) * 40; // days
+    const stamp = daysAgo(age, now);
+    user.onOrder(orderRow('MES', { id: 100_000 + i, status: ORDER_STATUS.FILLED, creationTimestamp: stamp, updateTimestamp: stamp }));
+    user.onTrade(tradeRow('MES', { id: i + 1, orderId: 100_000 + i, creationTimestamp: stamp }));
+  }
+  assert.equal(user.trades.size, 10_000);
+
+  user.prune(now);
+
+  // 14 of 40 days of fills and 2 of 40 days of orders remain.
+  assert.ok(user.trades.size <= 10_000 * (14 / 40) + 5 && user.trades.size >= 10_000 * (14 / 40) - 5, `trades ${user.trades.size}`);
+  assert.ok(user.orders.size <= 10_000 * (2 / 40) + 5, `orders ${user.orders.size}`);
+  assert.equal(user.tradesByOrder.size, user.trades.size, 'the index holds exactly the retained fills');
+  let indexed = 0;
+  for (const byId of user.tradesByOrder.values()) indexed += byId.size;
+  assert.equal(indexed, user.trades.size);
+  for (const [id] of user.trades) assert.ok(user.tradesForOrder(100_000 + id - 1).length === 1);
+});

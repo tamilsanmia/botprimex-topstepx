@@ -64,6 +64,8 @@ const GATEWAY_DEFAULTS = Object.freeze({
   // Market or account data older than block_entries_secs blocks entries; open
   // positions are flattened once it is older than flatten_secs (0 = never flatten).
   stale: { block_entries_secs: 15, flatten_secs: 120, notify: true },
+  // How long the user stream keeps finished orders and fills in memory.
+  user_retention: { orders_days: 2, trades_days: 14 },
   ticks: { record: true, retention_days: 30, pairs: 'whitelist' },
   history: { continuous: true, adjust: 'back', retention_days: 400, minute_retention_days: 61, second_retention_days: 15 },
   orderflow: { block_multiple: 25, value_area_pct: 70 },

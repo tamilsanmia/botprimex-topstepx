@@ -106,6 +106,9 @@
     // staleness is ignored on weekends and from flat_by until the session reset.
     // notify sends a Telegram message when data goes stale and when it recovers.
     "stale": { "block_entries_secs": 15, "flatten_secs": 120, "notify": true },
+    // How long the gateway keeps finished orders and fills in memory. The guard rebuilds
+    // missed end-of-day history from 90 days of fills at start-up, before anything is pruned.
+    "user_retention": { "orders_days": 2, "trades_days": 14 },
     "ticks": { "record": true, "retention_days": 30, "pairs": "whitelist" },
     "orderflow": { "block_multiple": 25, "value_area_pct": 70 }
   },

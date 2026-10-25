@@ -241,6 +241,7 @@ export class GatewayApp {
       hubFactory: this.upstream.userHubFactory,
       accountSelector: cfg.gateway.account,
       reconcileSecs: cfg.gateway.reconcile_secs,
+      retention: cfg.gateway.user_retention,
     });
 
     const server = createServer(this, {
@@ -289,6 +290,8 @@ export class GatewayApp {
     this.user.on('orphan-cancelled', (o, reason) => this.notify(`cancelled orphan protective order ${o.id} (${reason})`));
     if (!cfg.dataOnly) {
       this.setupGuard();
+      // The guard has rebuilt its history from the fills loaded at start; older ones can go now.
+      if (this.guardSource === 'projectx') this.user.armPruning();
       this.router_.guard = this.guard ? () => this.guard : null;
       for (const ev of ['trade', 'position', 'account']) this.user.on(ev, () => this.scheduleGuard());
 

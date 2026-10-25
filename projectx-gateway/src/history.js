@@ -68,7 +68,7 @@ export class ContinuousHistory {
    * and hour/day bars for about a year (measured). Requests are clamped to those
    * windows so asking for older data costs nothing and returns nothing.
    */
-  constructor({ client, contracts, enabled = true, adjust = 'back', retentionDays = 400, minuteRetentionDays = 61, secondRetentionDays = 21, now = () => Date.now() }) {
+  constructor({ client, contracts, enabled = true, adjust = 'back', retentionDays = 400, minuteRetentionDays = 61, secondRetentionDays = 15, now = () => Date.now() }) {
     this.client = client;
     this.contracts = contracts;
     this.enabled = enabled;

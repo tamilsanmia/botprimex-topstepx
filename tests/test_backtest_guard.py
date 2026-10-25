@@ -80,6 +80,12 @@ def test_target_needs_consistency_before_locking():
     assert research.evaluate(et(21, 12), closed, 0)["status"] != "account_locked"
 
 
+def test_consistency_pct_zero_removes_daily_cap():
+    g = guard(phases={"evaluation": {"consistency_pct": 0}})
+    res = g.evaluate(et(20, 11), [(et(20, 10), 2500.0)], 1)
+    assert "consistency_cap" not in codes(res)
+
+
 def test_counters_and_consistency_cap():
     g = guard()
     assert "max_trades_per_day" in codes(g.evaluate(et(20, 11), [], 10))

@@ -125,6 +125,7 @@
         "payout": { "min_winning_days": 5, "min_winning_day_amount": 150 }
       }
     },
+    // max_trades_per_day, max_consecutive_losses, max_risk_per_trade: 0 turns them off.
     "protection": {
       "dll_soft_pct": 70, "dll_hard_pct": 90, "mll_buffer": 300,
       "max_risk_per_trade": 250, "max_trades_per_day": 10, "max_consecutive_losses": 3,

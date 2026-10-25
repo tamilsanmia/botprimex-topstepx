@@ -9,5 +9,13 @@ ENV PYTHONPATH=/opt/projectx
 USER root
 RUN printf '\n# ProjectX (TopstepX) via projectx-gateway\ntry:\n    from projectx.ft_exchange import Projectx  # noqa: E402,F401\nexcept ImportError:\n    pass  # projectx.ft_exchange imported first; it registers itself when done\n' \
       >> /freqtrade/freqtrade/exchange/__init__.py
+# FreqUI's timeframe dropdowns are a fixed list starting at 1m. Add the seconds
+# timeframes the gateway streams. Skipped (with a warning) if FreqUI changes.
+RUN ui=$(python -c "import freqtrade,os;print(os.path.dirname(freqtrade.__file__))")/rpc/api_server/ui/installed/assets \
+ && files=$(grep -l '{value:`1m`,label:`1m`}' "$ui"/*.js 2>/dev/null || true) \
+ && if [ -n "$files" ]; then \
+      sed -i 's/{value:`1m`,label:`1m`}/{value:`1s`,label:`1s`},{value:`5s`,label:`5s`},{value:`10s`,label:`10s`},{value:`15s`,label:`15s`},{value:`30s`,label:`30s`},{value:`1m`,label:`1m`}/' $files \
+      && echo "FreqUI: seconds timeframes added to $files"; \
+    else echo "WARNING: FreqUI timeframe list not found; seconds timeframes not added to the UI"; fi
 USER ftuser
 RUN python -c "import freqtrade.exchange as e, ccxt; assert e.Projectx and 'projectx' in ccxt.exchanges"

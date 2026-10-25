@@ -309,8 +309,9 @@ export class GatewayApp {
     };
   }
 
+  /** Every front contract, so any pair can be downloaded or backtested; only the whitelist is streamed. */
   markets() {
-    return this.contracts.markets(this.roots);
+    return this.contracts.markets();
   }
 
   ohlcv(root, tf, since, limit) {
@@ -409,7 +410,7 @@ export class GatewayApp {
       throw new GatewayError('Snapshots are only accepted when the guard runs on Freqtrade dry-run data', { status: 409, kind: 'BadRequest' });
     }
     this.snapshot = body;
-    return this.evaluateGuard();
+    return this.evaluateGuard() ?? this.guardState();
   }
 
   guardReset(scope) {

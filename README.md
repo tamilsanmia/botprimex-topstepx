@@ -8,7 +8,7 @@ Freqtrade  --->  projectx-gateway  --->  TopstepX (api.topstepx.com, live data h
 ```
 
 * **projectx-gateway** is the only part that talks to TopstepX. It streams live prices, builds candles, places orders and enforces the Topstep rules.
-* **Freqtrade** runs the `BotPrimeX_TopstepX` strategy and asks the gateway for everything.
+* **Freqtrade** runs a TopstepX strategy (`BotPrimeX_TopstepX` or `NoTankAi_TopstepX`) and asks the gateway for everything.
 
 ---
 
@@ -80,7 +80,9 @@ PROJECTX_ACCOUNT_ID=27790619
 | `user_data/config.json` | Live / dry-run settings: pairs, Topstep rules, protection |
 | `user_data/config-futures-backtest.json` | Backtest settings |
 | `config_projectx.example.json`, `config_backtest.example.json` | Templates for the two configs |
-| `BotPrimeX.py`, `BotPrimeX_TopstepX.py` | The strategy and its TopstepX layer |
+| `BotPrimeX.py`, `BotPrimeX_TopstepX.py` | BotPrimeX and its TopstepX version |
+| `NoTankAI.py`, `NoTankAI_TopstepX.py` | NoTankAi and its TopstepX version |
+| `projectx/strategy_mixin.py` | The TopstepX layer shared by every `_TopstepX` strategy |
 | `docker-compose.yml` | Live / dry-run stack |
 | `docker-compose-webserver.yml` | Backtest stack (FreqUI) |
 
@@ -134,7 +136,7 @@ On top of Topstep's own rules, the `protection` block adds:
 | `dll_hard_pct` (90) | Close everything and stop for the day at 90% |
 | `mll_buffer` ($300) | Close everything and lock the account $300 before the Max Loss Limit |
 | `max_risk_per_trade` ($250) | Each trade's contracts and stop are sized to risk at most this |
-| `max_trades_per_day` (10), `max_consecutive_losses` (3) | Stop new trades for the day |
+| `max_trades_per_day` (10), `max_consecutive_losses` (3) | Stop new trades for the day (`0` turns them off) |
 | `daily_profit_lock` | After a good day, stop if too much profit is given back |
 
 The bot is always in one of 4 states:
@@ -159,6 +161,37 @@ Pairs are written `ROOT/USD:USD`, for example `MES/USD:USD`. Each one always tra
 
 More are available, including FX, rates, agriculture, natural gas and silver. They are listed in the config comments.
 
+## Strategies
+
+| Strategy | Signals | Use on TopstepX |
+| --- | --- | --- |
+| `BotPrimeX_TopstepX` | BotPrimeX (multi-timeframe extrema, RSI, DI, 24h change) | yes |
+| `NoTankAi_TopstepX` | NoTankAi (5m extrema, RSI, DI) | yes |
+| `BotPrimeX`, `NoTankAi` | the original crypto versions | no: no Topstep rules, -99% stop |
+
+Choose the live bot's strategy in `.env` with `STRATEGY=NoTankAi_TopstepX`, then run `./topstep restart`. In the backtest web app, pick it from the strategy list.
+
+The `_TopstepX` versions keep the original signals, ROI and partial exits. They add the TopstepX layer:
+* the Topstep rules and account protection
+* risk-based whole contracts and a real protective stop
+* the mini/micro limits and the roll guard
+
+Any strategy's crypto leverage is replaced by `topstep_strategy.leverage`. Profit-based settings (ROI, partial exits at +25%, DCA at -15%) are measured on stake, so they change with that leverage.
+
+**Make any other Freqtrade strategy TopstepX-ready.** Create `MyStrategy_TopstepX.py` next to it:
+
+```python
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from MyStrategy import MyStrategy
+from projectx.strategy_mixin import TopstepXMixin
+
+class MyStrategy_TopstepX(TopstepXMixin, MyStrategy):
+    pass
+```
+
+Note: both BotPrimeX and NoTankAi find tops and bottoms with `argrelextrema`, which needs candles after the turning point to confirm it. Backtests therefore look better than live trading will be. Confirm results in dry-run before going live.
+
 ## How trades are sized
 
 * **Stop distance**: 2 × ATR, kept between 8 and 400 ticks.
@@ -178,7 +211,7 @@ A separate web app (FreqUI) for backtests, with its own gateway, so it never tou
 ./topstep backtest-ui    # open http://<server-ip>:8095
 ```
 
-Log in with `api_server.username` / `password` from `user_data/config-futures-backtest.json`. Then pick `BotPrimeX_TopstepX`, a timeframe and dates, and run.
+Log in with `api_server.username` / `password` from `user_data/config-futures-backtest.json`. Then pick `BotPrimeX_TopstepX` or `NoTankAi_TopstepX`, a timeframe and dates, and run.
 
 The backtest UI is public on port 8095, so use a strong password. To make it private, set `WEBSERVER_BIND=127.0.0.1` in `.env` and use an SSH tunnel. The live bot's UI (port 8001) is always localhost-only:
 
@@ -192,7 +225,7 @@ ssh -L 8001:127.0.0.1:8001 <user>@<server>    # then open http://127.0.0.1:8001
 | --- | --- |
 | 1h, 2h, 4h, 1d | about 1 year |
 | 1m, 5m, 15m, 30m | about 60 days |
-| seconds | about 2 to 3 weeks |
+| seconds | about 2 weeks |
 
 * Run `./topstep download` every few weeks. New data is added to your files, so your own minute history keeps growing.
 * Each pair is one continuous series across contract rolls, with older contracts price-adjusted at each roll. Set `"adjust": "none"` in `projectx_gateway.history` for raw prices.

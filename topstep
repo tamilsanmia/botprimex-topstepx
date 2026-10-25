@@ -32,7 +32,8 @@ Live / dry-run bot
 Backtesting
   download [options]    Download history (see: ./topstep download --help)
   backtest-ui [stop]    Start (or stop) the backtest web app (FreqUI)
-  backtest [timerange]  Run a backtest in the terminal, e.g. 20260901-
+  backtest [timerange] [strategy]
+                        Run a backtest in the terminal, e.g. 20260901- NoTankAi_TopstepX
 
 Checks
   test                  Run the gateway and Python unit tests
@@ -99,7 +100,7 @@ cmd_setup() {
   mkdir -p user_data/strategies user_data/logs
   [ -f user_data/config.json ] || { cp config_projectx.example.json user_data/config.json; echo "created user_data/config.json"; }
   [ -f user_data/config-futures-backtest.json ] || { cp config_backtest.example.json user_data/config-futures-backtest.json; echo "created user_data/config-futures-backtest.json"; }
-  cp BotPrimeX.py BotPrimeX_TopstepX.py user_data/strategies/
+  cp BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py user_data/strategies/
   echo "copied strategies to user_data/strategies/"
   chown -R 1000:1000 user_data 2>/dev/null || true
   echo
@@ -120,7 +121,7 @@ Usage: ./topstep download [START_DATE]
          TIMEFRAMES="5m 1h 4h"             only these timeframes (default: 1m 5m 15m 30m 1h 2h 4h 1d)
          ERASE=1               delete and re-download (do this after a contract roll)
 
-ProjectX keeps 1h+ bars for about a year and minute bars for about 60 days.
+ProjectX keeps 1h+ bars for about a year, minute bars for about 60 days and second bars for about 2 weeks.
 Examples:
   ./topstep download
   ./topstep download 20260601
@@ -134,7 +135,8 @@ EOF
 
 cmd_backtest() {
   local range="${1:-}"
-  local args=(backtesting --config /freqtrade/user_data/config-futures-backtest.json --strategy BotPrimeX_TopstepX)
+  local strategy="${2:-${STRATEGY:-$(grep -E '^STRATEGY=' .env | cut -d= -f2 || true)}}"
+  local args=(backtesting --config /freqtrade/user_data/config-futures-backtest.json --strategy "${strategy:-BotPrimeX_TopstepX}")
   [ -n "$range" ] && args+=(--timerange "$range")
   "${BT[@]}" run --rm freqtrade-webserver "${args[@]}"
 }

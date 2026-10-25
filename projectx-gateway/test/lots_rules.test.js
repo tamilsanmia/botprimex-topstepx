@@ -79,6 +79,17 @@ test('rules: user values override presets, null keeps the preset, sessions merge
   assert.equal(r.session.no_entry_after, '15:30');
 });
 
+test('rules: 0 or false switches the counters and risk cap off', () => {
+  const r = resolveRules({
+    phase: 'evaluation', preset: '50k',
+    protection: { max_trades_per_day: 0, max_consecutive_losses: false, max_risk_per_trade: 0 },
+  }, null);
+  assert.equal(r.protection.max_trades_per_day, 0);
+  assert.equal(r.protection.max_consecutive_losses, false);
+  const noCap = resolveRules({ phase: 'evaluation', preset: '50k', phases: { evaluation: { consistency_pct: 0 } } }, null);
+  assert.equal(noCap.rules.consistency_pct, 0);
+});
+
 test('rules: invalid config fails fast with every problem listed', () => {
   assert.throws(() => resolveRules({
     phase: 'evaluation', preset: '50k', timezone: 'Mars/Olympus',

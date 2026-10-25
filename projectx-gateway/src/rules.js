@@ -174,7 +174,8 @@ function validate({ rules, session, protection, lots, timezone, problems }) {
   if (rules.daily_loss_limit !== false && rules.daily_loss_limit !== 0) positive(rules.daily_loss_limit, 'daily_loss_limit');
   positive(rules.max_loss_limit, 'max_loss_limit');
   positive(rules.profit_target, 'profit_target', { nullable: true });
-  pct(rules.consistency_pct, 'consistency_pct', { nullable: true });
+  // 0 or false turns the consistency rule (and its daily profit cap) off.
+  if (rules.consistency_pct !== 0 && rules.consistency_pct !== false) pct(rules.consistency_pct, 'consistency_pct', { nullable: true });
   if (!['trailing_eod', 'trailing_intraday', 'static'].includes(rules.max_loss_type)) {
     problems.push(`max_loss_type must be trailing_eod, trailing_intraday or static, got "${rules.max_loss_type}"`);
   }
@@ -237,9 +238,10 @@ function validate({ rules, session, protection, lots, timezone, problems }) {
   pct(protection.dll_hard_pct, 'protection.dll_hard_pct');
   if (Number(protection.dll_soft_pct) > Number(protection.dll_hard_pct)) problems.push('protection.dll_soft_pct must be <= dll_hard_pct');
   if (!(Number(protection.mll_buffer) >= 0)) problems.push('protection.mll_buffer must be >= 0');
-  positive(protection.max_risk_per_trade, 'protection.max_risk_per_trade', { nullable: true });
-  positive(protection.max_trades_per_day, 'protection.max_trades_per_day', { nullable: true });
-  positive(protection.max_consecutive_losses, 'protection.max_consecutive_losses', { nullable: true });
+  // 0 or false turns these protections off.
+  for (const key of ['max_risk_per_trade', 'max_trades_per_day', 'max_consecutive_losses']) {
+    if (protection[key] !== 0 && protection[key] !== false) positive(protection[key], `protection.${key}`, { nullable: true });
+  }
   const lock = protection.daily_profit_lock;
   if (lock?.enabled) {
     positive(lock.activate_at, 'protection.daily_profit_lock.activate_at');

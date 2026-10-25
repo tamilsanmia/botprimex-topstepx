@@ -131,6 +131,12 @@ test('trade and loss counters block entries', () => {
   assert.ok(!codes(g.evaluate({ ...base, now: et(20, 10), closedResults: [-1, -2, 4] })).includes('max_consecutive_losses'));
 });
 
+test('counters set to 0 never block', () => {
+  const g = makeGuard({ protection: { daily_profit_lock: { enabled: false }, max_trades_per_day: 0, max_consecutive_losses: 0 } });
+  const res = g.evaluate({ ...base, now: et(20, 10), entriesToday: 50, closedResults: [-1, -1, -1, -1, -1] });
+  assert.equal(res.status, STATUS.ACTIVE);
+});
+
 test('session clock: entry window, flat_by, weekend, trading windows, news blackout', () => {
   const g = makeGuard({
     session: {

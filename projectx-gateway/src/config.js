@@ -58,7 +58,7 @@ const GATEWAY_DEFAULTS = Object.freeze({
   balance_offset: 'auto',
   rate_limits: { bars_per_30s: 40, other_per_60s: 180 },
   ticks: { record: true, retention_days: 30, pairs: 'whitelist' },
-  history: { continuous: true, adjust: 'back', retention_days: 400, minute_retention_days: 61, second_retention_days: 21 },
+  history: { continuous: true, adjust: 'back', retention_days: 400, minute_retention_days: 61, second_retention_days: 15 },
   orderflow: { block_multiple: 25, value_area_pct: 70 },
 });
 

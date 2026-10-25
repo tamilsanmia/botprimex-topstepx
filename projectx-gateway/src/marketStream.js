@@ -28,7 +28,7 @@ const num = (v) => {
  *     volume-at-price profile (DomType 5) and session extremes. No ladder.
  */
 export class MarketStream extends EventEmitter {
-  constructor({ url, tokenFactory, contracts, hubFactory }) {
+  constructor({ url, tokenFactory, contracts, hubFactory, rebuildStepsMs }) {
     super();
     this.contracts = contracts;
     this.wanted = new Map();
@@ -41,6 +41,7 @@ export class MarketStream extends EventEmitter {
       url,
       tokenFactory,
       factory: hubFactory,
+      rebuildStepsMs,
       handlers: {
         GatewayQuote: (contractId, payload) => this.onQuote(contractId, payload),
         GatewayTrade: (contractId, payload) => this.onTrade(contractId, payload),

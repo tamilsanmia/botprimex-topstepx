@@ -228,7 +228,11 @@ export class GatewayApp {
     };
     this.market.on('quote', onBook);
     this.market.on('depth', onBook);
-    this.market.on('reconnected', (rs) => rs.forEach((r) => this.store.repair(r)));
+    // After a rebuilt or reconnected hub, ticks sent while it was down are lost: refetch the gap.
+    this.market.on('reconnected', (rs) => {
+      console.log(`[gateway] market hub reconnected, repairing candles for ${rs.join(', ')}`);
+      rs.forEach((r) => this.store.repair(r).catch((err) => console.warn(`[gateway] candle repair ${r} failed: ${err.message}`)));
+    });
 
     this.user = new UserStream({
       client: this.client,
@@ -472,6 +476,11 @@ export class GatewayApp {
     for (const roll of this.contracts.rolls.slice(before)) {
       await this.market.roll(roll.root, roll.from, roll.to);
       this.notify(`${roll.root} front contract rolled ${roll.from} -> ${roll.to}`);
+      try {
+        await this.store.rebuild(roll.root);
+      } catch (err) {
+        console.warn(`[gateway] candle rebuild after ${roll.root} roll failed: ${err.message}`);
+      }
     }
   }
 

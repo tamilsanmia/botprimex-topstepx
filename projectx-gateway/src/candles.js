@@ -210,6 +210,41 @@ export class CandleStore extends EventEmitter {
   }
 
   /**
+   * After a contract roll: refetches every ready series of the root over the span
+   * it holds. Back-adjusted history shifts at each roll, so the bars held from
+   * before it would otherwise keep the old prices and show a gap at the splice.
+   * The new bars replace the old ones in one assignment, with the live ticks
+   * received during the request replayed on top. A series whose refetch fails or
+   * comes back empty keeps what it has.
+   */
+  async rebuild(root) {
+    const jobs = [];
+    for (const s of this.series.values()) {
+      if (s.root !== root || !s.ready) continue;
+      jobs.push(
+        this.rebuildSeries(s).catch((err) => {
+          console.warn(`[candles] rebuild ${root} ${s.tf} failed: ${err.message}`);
+          return false;
+        }),
+      );
+    }
+    const done = await Promise.all(jobs);
+    const rebuilt = done.filter(Boolean).length;
+    if (jobs.length) console.log(`[candles] rebuilt ${rebuilt}/${jobs.length} series for ${root}`);
+    return rebuilt;
+  }
+
+  async rebuildSeries(s) {
+    const requestedAt = Date.now();
+    const count = Math.min(MAX_BARS_PER_REQUEST, Math.max(s.loadedCount, s.bars.length));
+    const bars = await this.backfill(s.root, s.tf, count, requestedAt, PRIORITY.BACKGROUND);
+    if (!bars.length) return false;
+    this.replace(s, bars, requestedAt, -Infinity);
+    s.loadedCount = Math.max(s.loadedCount, count);
+    return true;
+  }
+
+  /**
    * Candles from the store. `since` asks for history from a point; anything older
    * than what is held is fetched straight from REST (download-data paginates this way).
    */

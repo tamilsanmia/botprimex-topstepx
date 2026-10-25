@@ -145,7 +145,7 @@ test('after SignalR gives up (close) the hub is rebuilt and onReady runs again',
   await waitFor(() => registry.hubs.length === 2 && hub.state === 'connected');
   assert.equal(registry.hubs[1].started, true);
   assert.equal(ready.length, 2);
-  assert.deepEqual(ready[1].info, { reconnected: false }, 'a rebuild is a fresh connect, not a reconnect');
+  assert.deepEqual(ready[1].info, { reconnected: true }, 'a rebuild after a drop is a reconnect: what the hub sent meanwhile is lost');
   assert.equal(hub.rebuildAttempt, 0, 'backoff resets after a successful connect');
   assert.deepEqual(states.slice(0, 4), ['connecting', 'connected', ['disconnected', 'gave up'], 'connecting']);
   await hub.stop();
@@ -180,6 +180,7 @@ test('rebuild keeps backing off through failures, then recovers', async (t) => {
   assert.equal(registry.hubs[2].started, false);
   assert.equal(registry.hubs[3].started, true);
   assert.equal(ready.length, 2, 'onReady only ran for the successful connects');
+  assert.deepEqual(ready.map((r) => r.info.reconnected), [false, true], 'failed attempts in between do not repeat or hide the reconnect');
   assert.equal(hub.rebuildAttempt, 0);
   await hub.stop();
 });
@@ -196,6 +197,19 @@ test('an initial connect failure schedules a rebuild instead of throwing', async
   await waitFor(() => hub.state === 'connected');
   assert.equal(registry.hubs.length, 2);
   assert.equal(ready.length, 1);
+  assert.deepEqual(ready[0].info, { reconnected: false }, 'the first successful connect is not a reconnect');
+  await hub.stop();
+});
+
+test('every further rebuild reports reconnected:true exactly once per connect', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const { hub, registry, ready } = setup({ steps: [5] });
+  await hub.start();
+  registry.hubs[0].closeCb(new Error('first drop'));
+  await waitFor(() => registry.hubs.length === 2 && hub.state === 'connected');
+  registry.hubs[1].closeCb(new Error('second drop'));
+  await waitFor(() => registry.hubs.length === 3 && hub.state === 'connected');
+  assert.deepEqual(ready.map((r) => r.info.reconnected), [false, true, true]);
   await hub.stop();
 });
 

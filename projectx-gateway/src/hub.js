@@ -32,6 +32,7 @@ export class ManagedHub {
     this.lastMessageAt = 0;
     this.connectedAt = 0;
     this.stateAt = 0;
+    this.everConnected = false;
   }
 
   setState(state, info) {
@@ -82,12 +83,16 @@ export class ManagedHub {
       if (!this.stopping) this.scheduleRebuild();
     });
 
+    // A connect after an earlier one is a reconnect even though the connection object
+    // is new: whatever the hub sent while it was down is lost, and onReady has to repair it.
+    const reconnected = this.everConnected;
     try {
       await hub.start();
       this.connection = hub;
       this.connectedAt = Date.now();
+      this.everConnected = true;
       this.rebuildAttempt = 0;
-      await this.onReady(hub, { reconnected: false });
+      await this.onReady(hub, { reconnected });
       this.setState('connected');
       console.log(`[${this.name}] connected (${this.url})`);
     } catch (err) {

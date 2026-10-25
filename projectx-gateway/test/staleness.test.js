@@ -330,3 +330,35 @@ test('assertStartable rejects thresholds that cannot work', () => {
   assert.throws(() => assertStartable(cfg({ block_entries_secs: 'x', flatten_secs: 120 })), /block_entries_secs/);
   assert.throws(() => assertStartable(cfg({ block_entries_secs: 60, flatten_secs: 30 })), /flatten_secs/);
 });
+
+/* ------------------------------------------------------------ contract rolls -- */
+
+function rollApp({ rebuild }) {
+  const calls = [];
+  const app = Object.create(GatewayApp.prototype);
+  const rolls = [];
+  app.contracts = {
+    rolls,
+    refresh: async () => { calls.push('refresh'); rolls.push({ root: 'MES', from: 'CON.MES.H27', to: 'CON.MES.M27' }); },
+  };
+  app.market = { roll: async (...a) => { calls.push(['market.roll', ...a]); } };
+  app.store = { rebuild };
+  app.notify = (text) => calls.push(['notify', text]);
+  return { app, calls };
+}
+
+test('a contract roll moves the subscription, then rebuilds the root\'s candle series', async () => {
+  const rebuilt = [];
+  const { app, calls } = rollApp({ rebuild: async (root) => { calls.push('rebuild'); rebuilt.push(root); } });
+  await app.checkRolls();
+  assert.deepEqual(rebuilt, ['MES']);
+  const order = calls.map((c) => (Array.isArray(c) ? c[0] : c));
+  assert.deepEqual(order, ['refresh', 'market.roll', 'notify', 'rebuild']);
+});
+
+test('a failing rebuild after a roll is logged, not thrown', async (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  const { app } = rollApp({ rebuild: async () => { throw new Error('upstream down'); } });
+  await app.checkRolls();
+  assert.match(warn.mock.calls[0].arguments[0], /candle rebuild after MES roll failed: upstream down/);
+});

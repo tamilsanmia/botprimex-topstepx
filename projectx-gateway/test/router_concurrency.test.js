@@ -16,7 +16,7 @@ function realGuard() {
   const resolved = resolveRules({
     phase: 'evaluation',
     preset: '50k',
-    session: { trade_weekends: true, hold_mode: 'overnight', no_entry_before: '00:00', no_entry_after: '00:00' },
+    session: { trade_weekends: true, hold_mode: 'overnight', no_entry_before: '00:00', no_entry_after: '00:00', use_holiday_calendar: false },
   }, null);
   const guard = new AccountGuard({ resolved, lots: new LotTable(), statePath: null });
   guard.evaluate({ balance: 50000, unrealized: 0, dayRealized: 0, closedResults: [], entriesToday: 0, legs: [] });

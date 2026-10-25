@@ -79,6 +79,9 @@ export const CONSISTENCY_MODES = Object.freeze(['cap_day', 'raise_target', 'off'
 export const SESSION_DEFAULTS = Object.freeze({
   reset_time: '18:00', eod_time: '16:10', no_entry_before: '18:05', no_entry_after: '15:45',
   flat_by: '16:05', hold_mode: 'intraday', trading_windows: [], trade_weekends: false, news_blackout: [],
+  // CME holidays and early closes (src/holidays.js): closed days behave like a weekend, early
+  // closes bring the no-entry and flat-by times forward. false ignores the calendar.
+  use_holiday_calendar: true,
 });
 
 export const PROTECTION_DEFAULTS = Object.freeze({
@@ -227,6 +230,9 @@ function validate({ rules, session, protection, lots, timezone, problems }) {
     } catch (err) {
       problems.push(err.message);
     }
+  }
+  if (typeof session.use_holiday_calendar !== 'boolean') {
+    problems.push(`session.use_holiday_calendar must be true or false, got ${JSON.stringify(session.use_holiday_calendar)}`);
   }
   if (!['intraday', 'overnight'].includes(session.hold_mode)) {
     problems.push(`session.hold_mode must be intraday or overnight, got "${session.hold_mode}"`);

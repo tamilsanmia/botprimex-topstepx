@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+import { earlyCloseTimes, holidayFor } from './holidays.js';
 import { maxMiniEquivalent } from './rules.js';
 import { SessionClock, inWindow, parseDays, parseHHMM } from './session.js';
 
@@ -204,7 +205,22 @@ export class AccountGuard extends EventEmitter {
    */
   sessionClosed(now) {
     const p = this.clock.local(now);
-    return this.isWeekend(p) || inWindow(p.minutes, this.times.flatBy, this.times.reset);
+    if (this.isWeekend(p) || inWindow(p.minutes, this.times.flatBy, this.times.reset)) return true;
+    const h = this.holiday(now);
+    return Boolean(h && (h.closed || now >= h.times.closeTs));
+  }
+
+  /**
+   * The holiday row for the trading day containing `now` ({ row, closed, times, endTs }), or
+   * null when the calendar is off or the day is a normal one. `times` is set for an early
+   * close; endTs is the session reset that ends the day.
+   */
+  holiday(now) {
+    if (this.session.use_holiday_calendar === false) return null;
+    const day = this.clock.tradingDay(now);
+    const row = holidayFor(day.key);
+    if (!row) return null;
+    return { row, closed: row.type === 'closed', times: earlyCloseTimes(row), endTs: day.end };
   }
 
   /**
@@ -242,7 +258,19 @@ export class AccountGuard extends EventEmitter {
       return out;
     }
 
+    // A holiday acts like a weekend. An early close adds a tighter no-entry and flat-by time; it never
+    // loosens the configured ones, which still apply below.
+    const holiday = this.holiday(now);
+    if (holiday?.closed) {
+      out.blockEntries.push('holiday');
+      out.flatten.push('holiday');
+      return out;
+    }
+
     if (inWindow(p.minutes, t.noEntryAfter, t.noEntryBefore)) out.blockEntries.push('no_entry_window');
+    if (holiday && now >= holiday.times.noEntryTs && now < holiday.endTs && !out.blockEntries.includes('no_entry_window')) {
+      out.blockEntries.push('no_entry_window');
+    }
     if (t.windows.length && !t.windows.some((w) => inWindow(p.minutes, w.start, w.end))) out.blockEntries.push('outside_trading_windows');
     for (const w of t.news) {
       if (w.days.has(p.weekday) && inWindow(p.minutes, w.start, w.end)) {
@@ -250,7 +278,10 @@ export class AccountGuard extends EventEmitter {
         if (w.flatten) out.flatten.push('news_blackout');
       }
     }
-    if (this.session.hold_mode === 'intraday' && inWindow(p.minutes, t.flatBy, t.reset)) out.flatten.push('session_flat_by');
+    if (this.session.hold_mode === 'intraday'
+      && (inWindow(p.minutes, t.flatBy, t.reset) || (holiday && now >= holiday.times.flatTs && now < holiday.endTs))) {
+      out.flatten.push('session_flat_by');
+    }
     return out;
   }
 
@@ -410,6 +441,7 @@ export class AccountGuard extends EventEmitter {
       reasons,
       phase: this.resolved.phase,
       tradingDay: day.key,
+      holiday: this.holidayInfo(now),
       sessionStart: day.start,
       eodTs: day.eodTs,
       metrics: {
@@ -458,6 +490,12 @@ export class AccountGuard extends EventEmitter {
       this.emit('change', result, previous);
     }
     return result;
+  }
+
+  /** { date, name, type, closeEt } of today's holiday for status displays, or null. */
+  holidayInfo(now) {
+    const h = this.holiday(now);
+    return h ? { date: h.row.date, name: h.row.name, type: h.row.type, closeEt: h.row.closeEt } : null;
   }
 
   lockAccount(reason, detail, reasons) {

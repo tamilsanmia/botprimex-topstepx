@@ -223,7 +223,7 @@ export async function makeMockApp({ topstep = {}, gateway = {}, whitelist = ['ME
     exchange: { pair_whitelist: whitelist },
     projectx_gateway: { account_source: 'projectx', ticks: { record: false }, ...gateway },
     topstep: {
-      session: { trade_weekends: true, hold_mode: 'overnight', no_entry_before: '00:00', no_entry_after: '00:00' },
+      session: { trade_weekends: true, hold_mode: 'overnight', no_entry_before: '00:00', no_entry_after: '00:00', use_holiday_calendar: false },
       ...topstep,
     },
   }));

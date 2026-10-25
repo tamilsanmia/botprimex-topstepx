@@ -128,10 +128,25 @@ check_drift() {
     fi
   done
 }
+rand_hex() {
+  openssl rand -hex "$1" 2>/dev/null || head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+# Copy an example config and replace its placeholder api_server secrets with random values.
+create_config() {
+  local src=$1 dest=$2
+  cp "$src" "$dest"
+  sed -i \
+    -e "s/\"jwt_secret_key\": \"change-me[^\"]*\"/\"jwt_secret_key\": \"$(rand_hex 32)\"/" \
+    -e "s/\"ws_token\": \"change-me[^\"]*\"/\"ws_token\": \"$(rand_hex 16)\"/" \
+    -e "s/\"password\": \"change-me[^\"]*\"/\"password\": \"$(rand_hex 16)\"/" \
+    "$dest"
+  chmod 600 "$dest"
+  echo "created $dest (api_server password, jwt_secret_key and ws_token set to random values)"
+}
 cmd_setup() {
   if [ ! -f .env ]; then
     cp .env.example .env
-    secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    secret=$(rand_hex 32)
     sed -i "s/^GATEWAY_SECRET=$/GATEWAY_SECRET=$secret/" .env
     chmod 600 .env
     echo "created .env (fill in PROJECTX_USERNAME and PROJECTX_API_KEY)"
@@ -139,16 +154,16 @@ cmd_setup() {
     echo ".env already exists"
   fi
   mkdir -p user_data/strategies user_data/logs user_data/backtest-gateway
-  [ -f user_data/config.json ] || { cp config_projectx.example.json user_data/config.json; echo "created user_data/config.json"; }
-  [ -f user_data/config-futures-backtest.json ] || { cp config_backtest.example.json user_data/config-futures-backtest.json; echo "created user_data/config-futures-backtest.json"; }
+  [ -f user_data/config.json ] || create_config config_projectx.example.json user_data/config.json
+  [ -f user_data/config-futures-backtest.json ] || create_config config_backtest.example.json user_data/config-futures-backtest.json
   sync_strategies
   chown -R 1000:1000 user_data 2>/dev/null || true
   echo
   bold "Next:"
   echo "  1. Edit .env: PROJECTX_USERNAME, PROJECTX_API_KEY (and PROJECTX_ACCOUNT_ID)"
-  echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance, and the api_server"
-  echo "     password, jwt_secret_key and ws_token (the bot and the backtest web app refuse to start"
-  echo "     with empty or change-me values; user_data/config-futures-backtest.json needs the same)"
+  echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance. New configs get random"
+  echo "     api_server secrets; the bot and the backtest web app refuse empty or change-me values"
+  echo "     (read the UI login password from api_server.password in each config)"
   echo "  3. ./topstep build && ./topstep accounts && ./topstep start"
 }
 

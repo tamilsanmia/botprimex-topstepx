@@ -10,7 +10,9 @@ from freqtrade.exchange.exchange import Exchange
 from freqtrade.persistence import Trade, init_db
 
 import ft_harness as h
-from projectx.ft_exchange import Projectx, report_stop_as_open
+from freqtrade.freqtradebot import FreqtradeBot
+from freqtrade.persistence import Order
+from projectx.ft_exchange import Projectx, _patch_onexchange_recovery, report_stop_as_open
 
 
 @pytest.fixture
@@ -104,3 +106,77 @@ def test_a_resting_stop_that_fills_later_closes_the_trade_the_same_way(db, monke
     assert_closed_by_the_stop(trade)
     assert len(ex.created) == 1
     assert bot.emergency_exits == []
+
+
+# ------------------------------------------------- recovery of a trade that is already flat --
+
+
+@pytest.fixture
+def recovery(monkeypatch):
+    """Installs the recovery wrapper for one test; monkeypatch restores Freqtrade's method afterwards."""
+    original = FreqtradeBot.handle_onexchange_order
+    monkeypatch.setattr(FreqtradeBot, "handle_onexchange_order", original)
+    _patch_onexchange_recovery()
+    return original
+
+
+def stop_stored_as_closed(bot, trade):
+    """What Freqtrade did before the fix: the stop filled on placement was stored as not open."""
+    stop = h.filled_stop()
+    trade.orders.append(Order.parse_from_ccxt_object(stop, trade.pair, "stoploss", trade.amount, 29102.25))
+    Trade.commit()
+    bot.exchange.on_exchange = [o.to_ccxt_object("stopPrice") | {"side": o.side} for o in trade.orders]
+    return stop
+
+
+def test_the_patch_wraps_once(recovery):
+    wrapped = FreqtradeBot.handle_onexchange_order
+    _patch_onexchange_recovery()
+    assert FreqtradeBot.handle_onexchange_order is wrapped
+    assert wrapped is not recovery and wrapped._projectx_recovery is True
+
+
+def test_a_trade_whose_fills_net_to_zero_is_closed_instead_of_recovered(db, monkeypatch, recovery):
+    ex = h.StubExchange()
+    bot = h.make_bot(monkeypatch, h.make_strategy(), ex)
+    trade = h.incident_trade(bot)
+    stop_stored_as_closed(bot, trade)
+    assert trade.is_open and trade.open_sl_orders == []
+    bot.notified_exits.clear()  # the entry fills
+
+    assert bot.handle_onexchange_order(trade) is False
+    assert_closed_by_the_stop(trade)
+    assert trade.close_date_utc == trade.orders[-1].order_filled_utc
+    assert bot.notified_exits == [("exit", "stoploss", True)]
+    assert bot.protections_handled == [h.PAIR]
+
+    # Again (FreqUI "reload trade"): no error, still closed, nothing more sent.
+    bot.handle_onexchange_order(trade)
+    assert_closed_by_the_stop(trade)
+    assert [n for n in bot.notified_exits if n[0] == "exit" or n[2]] == [("exit", "stoploss", True)]
+
+
+def test_a_trade_left_open_by_freqtrades_recovery_is_closed_on_the_next_call(db, monkeypatch, recovery):
+    ex = h.StubExchange()
+    bot = h.make_bot(monkeypatch, h.make_strategy(), ex)
+    trade = h.incident_trade(bot)
+    stop_stored_as_closed(bot, trade)
+    recovery(bot, trade)  # Freqtrade's own recovery, as it ran live
+    assert trade.is_open and trade.amount == 2.0 and trade.open_rate == h.DCA_PRICE, "the live corruption"
+
+    assert bot.handle_onexchange_order(trade) is False
+    assert_closed_by_the_stop(trade)
+
+
+def test_without_a_filled_exit_the_recovery_is_freqtrades(db, monkeypatch, recovery):
+    ex = h.StubExchange()
+    bot = h.make_bot(monkeypatch, h.make_strategy(), ex)
+    trade = h.short_mnq_trade()
+    h.fill_entry(bot, trade, h.ENTRY_ID, h.ENTRY_PRICE, h.T0, ask=29100.25)
+    ex.on_exchange = [o.to_ccxt_object("stopPrice") | {"side": o.side} for o in trade.orders]
+    bot.notified_exits.clear()  # the entry fill
+
+    assert bot.handle_onexchange_order(trade) is False
+    assert trade.is_open and trade.amount == 2.0
+    assert [n for n in bot.notified_exits if n[0] == "exit" or n[2]] == [], "nothing sent"
+    assert bot.protections_handled == []

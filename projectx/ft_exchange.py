@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import projectx  # noqa: F401  - registers ccxt classes before Exchange initialises
 
-from freqtrade.enums import MarginMode, RunMode, TradingMode
+from freqtrade.enums import ExitType, MarginMode, RunMode, TradingMode
 from freqtrade.exceptions import ConfigurationError, OperationalException
 from freqtrade.exchange.exchange import Exchange
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_prev_date, timeframe_to_seconds
@@ -82,6 +82,106 @@ def _patch_seconds_timeframes() -> None:
 
     _throttle._projectx_seconds = True
     ft_worker.Worker._throttle = _throttle
+
+
+def _last_exit_if_net_flat(trade):
+    """The latest filled exit or stop when the trade's filled orders net to zero (or less), else None."""
+    from freqtrade.exchange import amount_to_contract_precision
+
+    filled = [o for o in trade.orders if not o.ft_is_open and o.filled]
+    exits = [o for o in filled if o.ft_order_side != trade.entry_side]
+    if not exits:
+        return None
+    net = sum(o.safe_amount_after_fee for o in filled if o.ft_order_side == trade.entry_side)
+    net -= sum(o.safe_amount_after_fee for o in exits)
+    net = amount_to_contract_precision(net, trade.amount_precision, trade.precision_mode, trade.contract_size)
+    if net > 0:
+        return None
+    return max(exits, key=lambda o: o.order_filled_utc or o.order_date_utc)
+
+
+def _settle_from_orders(trade, last) -> None:
+    """
+    Closes the trade at `last`'s price with amount and open rate taken from the orders before it,
+    as Freqtrade's own close leaves them. Freqtrade's recovery leaves them at the last entry's
+    values when the fills net to zero, and recalc_trade_from_orders keeps them as they are then.
+    """
+    last.ft_is_open = True
+    try:
+        trade.recalc_trade_from_orders()
+    finally:
+        last.ft_is_open = False
+    trade.close(last.safe_price, show_msg=False)
+
+
+def _close_if_net_flat(bot, trade) -> bool:
+    """
+    Closes an open trade whose filled orders already net to zero, at its last exit's price.
+
+    Freqtrade's on-exchange recovery re-applies every order with `recalculating=True`: each
+    entry resets the trade amount to that order's amount, and an exit larger than that amount
+    does not close the trade. A trade whose stop filled for the whole position therefore stayed
+    open (amount and open rate of the last entry) and the recovery ran again every loop.
+    """
+    from freqtrade.persistence import Trade
+
+    if not trade.is_open:
+        return False
+    last = _last_exit_if_net_flat(trade)
+    if last is None:
+        return False
+    stoploss = last.ft_order_side == "stoploss"
+    if stoploss:
+        trade.exit_reason = ExitType.STOPLOSS_ON_EXCHANGE.value
+    elif not trade.exit_reason:
+        trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
+    logger.warning(
+        "%s: filled orders net to zero, so the position is flat; closing the trade at %s (order %s, %s)",
+        trade, last.safe_price, last.order_id, trade.exit_reason,
+    )
+    _settle_from_orders(trade, last)
+    trade.close_date = last.order_filled_utc or trade.close_date
+    Trade.commit()
+    if stoploss:
+        bot._notify_exit(trade, "stoploss", True)
+        bot.handle_protections(trade.pair, trade.trade_direction)
+    else:
+        bot.order_close_notify(trade, last, False, send_msg=True)
+    return True
+
+
+def _patch_onexchange_recovery() -> None:
+    """Wrap FreqtradeBot.handle_onexchange_order so a net-flat trade is closed, not recovered again."""
+    import freqtrade.freqtradebot as ft_bot
+
+    original = ft_bot.FreqtradeBot.handle_onexchange_order
+    if getattr(original, "_projectx_recovery", False):
+        return
+
+    def handle_onexchange_order(self, trade) -> bool:
+        from freqtrade.persistence import Trade
+
+        if not isinstance(self.exchange, Projectx):
+            return original(self, trade)
+        if _close_if_net_flat(self, trade):
+            return False
+        result = original(self, trade)
+        if result:  # the trade was deleted
+            return result
+        if trade.is_open:
+            # The recovery may have added exit orders it did not know before.
+            _close_if_net_flat(self, trade)
+        else:
+            # Re-applying the orders of a closed trade (FreqUI "reload trade") leaves amount and
+            # open rate at the last entry's values; put back the values the close had.
+            last = _last_exit_if_net_flat(trade)
+            if last is not None:
+                _settle_from_orders(trade, last)
+                Trade.commit()
+        return result
+
+    handle_onexchange_order._projectx_recovery = True
+    ft_bot.FreqtradeBot.handle_onexchange_order = handle_onexchange_order
 
 
 def report_stop_as_open(order: dict) -> dict:
@@ -153,6 +253,7 @@ class Projectx(Exchange):
         check_startup(config)
         # Patched here, not at import: freqtrade.exchange imports this module while it initialises.
         _patch_seconds_timeframes()
+        _patch_onexchange_recovery()
         super().__init__(config, *args, **kwargs)
         # Freqtrade caches entry/exit rates for 5 minutes; prices here come from a
         # live tick stream at no request cost, so a 1 second cache is enough.

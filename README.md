@@ -82,6 +82,7 @@ PROJECTX_ACCOUNT_ID=27790619
 | `config_projectx.example.json`, `config_backtest.example.json` | Templates for the two configs |
 | `BotPrimeX.py`, `BotPrimeX_TopstepX.py` | BotPrimeX and its TopstepX version |
 | `NoTankAI.py`, `NoTankAI_TopstepX.py` | NoTankAi and its TopstepX version |
+| `EmaRsiCross.py`, `EmaRsiCross_TopstepX.py` | EMA 20/200 cross + RSI 30/70 and its TopstepX version |
 | `projectx/strategy_mixin.py` | The TopstepX layer shared by every `_TopstepX` strategy |
 | `docker-compose.yml` | Live / dry-run stack |
 | `docker-compose-webserver.yml` | Backtest stack (FreqUI) |
@@ -184,6 +185,7 @@ More are available, including FX, rates, agriculture, natural gas and silver. Th
 | --- | --- | --- |
 | `BotPrimeX_TopstepX` | BotPrimeX (multi-timeframe extrema, RSI, DI, 24h change) | yes |
 | `NoTankAi_TopstepX` | NoTankAi (5m extrema, RSI, DI) from `NoTankAI.py` in this folder | yes |
+| `EmaRsiCross_TopstepX` | EMA 20/200 cross with an RSI 30/70 filter (`entry_mode` "cross"), or RSI 30/70 pullbacks in the EMA trend (`entry_mode` "pullback"), from `EmaRsiCross.py`. No look-ahead. | yes |
 | `BotPrimeX`, `NoTankAi` | the original crypto versions | no: no Topstep rules, -99% stop |
 
 Choose the live bot's strategy in `.env` with `STRATEGY=NoTankAi_TopstepX`, then run `./topstep restart`. In the backtest web app, pick it from the strategy list.

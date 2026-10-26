@@ -90,7 +90,7 @@ print_guard() {
   gateway_call GET /guard | "${LIVE[@]}" exec -T projectx-gateway node -e "$node_format"
 }
 
-STRATEGY_FILES=(BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py)
+STRATEGY_FILES=(BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py EmaRsiCross.py EmaRsiCross_TopstepX.py)
 # Copy each repo strategy into user_data/strategies only when it is missing. An
 # identical file is skipped; a different one is kept (it may hold your edits), unless
 # FORCE=1, which first saves it to user_data/strategies/.backup/<file>.<UTC stamp>.

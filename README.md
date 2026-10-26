@@ -334,6 +334,8 @@ To serve a web app under a domain, point a DNS `A` record at the server and put 
 (umask 077; tar czf ~/botprimex-backup-$(date -u +%Y%m%d).tar.gz user_data .env)
 ```
 
+The trade database is the file named by `FREQTRADE_DB_URL` in `.env` (default `user_data/tradesv3.sqlite`).
+
 **Settings added for safety** (all optional; the defaults are shown in `config_projectx.example.json` and `.env.example`):
 
 | Setting | Where | Default |
@@ -342,6 +344,7 @@ To serve a web app under a domain, point a DNS `A` record at the server and put 
 | `GATEWAY_ALLOW_QUERY_SECRET` | `.env` | off |
 | `GATEWAY_DATA_ONLY` | the backtest compose file | on there, never on the live stack |
 | `WEBSERVER_BIND`, `WEBSERVER_PORT` | `.env` | `127.0.0.1`, `8095` |
+| `FREQTRADE_DB_URL` | `.env` | `sqlite:////freqtrade/user_data/tradesv3.sqlite` |
 | `projectx_gateway.protective_stop` | config | `gateway`, 10 s, 30 s |
 | `projectx_gateway.stale` | config | 15 s, 120 s, notify on |
 | `projectx_gateway.user_retention` | config | orders 2 days, trades 14 days |

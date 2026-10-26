@@ -38,7 +38,7 @@ text = re.sub(r'^\s*//.*$', '', text, flags=re.M)
 c = json.loads(text)
 c.update(dry_run=True, timeframe=tf, force_entry_enable=True)
 c["api_server"].update(username="matrix", password="matrix-password",
-                       jwt_secret_key="matrix-jwt-secret", ws_token="matrix-ws-token")
+                       jwt_secret_key="matrix-jwt-secret-0123456789abcdef", ws_token="matrix-ws-token")
 c["topstep"]["session"].update(trade_weekends=True, no_entry_after="17:50", no_entry_before="18:00",
                                flat_by="17:58", news_blackout=[], use_holiday_calendar=False)
 c["topstep"]["protection"]["max_risk_per_trade"] = 5000

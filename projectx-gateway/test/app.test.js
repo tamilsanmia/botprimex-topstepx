@@ -213,6 +213,27 @@ test('reduceOnly with no position is InvalidOrder', async () => {
   assert.equal(res.body.kind, 'InvalidOrder');
 });
 
+test('a reduce-only stop already through the market fills on placement, and a second one is refused', async () => {
+  const entry = await env.post('/order', { symbol: MES, type: 'market', side: 'sell', amount: 1 });
+  assert.equal(entry.status, 200);
+  assert.equal(entry.body.status, 'closed');
+  await waitFor(async () => (await env.get('/positions')).body.some((p) => p.side === 'short'));
+
+  const last = env.app.client.exchange.price('MES');
+  // 10 ticks below last: through the market for a buy stop (the mock's noise is +-2 ticks per second).
+  const stopPrice = Math.round((last - 2.5) / 0.25) * 0.25;
+  const stop = await env.post('/order', { symbol: MES, type: 'stop', side: 'buy', amount: 1, price: null, params: { stopPrice, reduceOnly: true } });
+  assert.equal(stop.status, 200);
+  assert.equal(stop.body.status, 'closed', 'POST /order answers with the fill');
+  assert.equal(stop.body.filled, 1);
+
+  await waitFor(async () => (await env.get('/positions')).body.length === 0);
+  const again = await env.post('/order', { symbol: MES, type: 'stop', side: 'buy', amount: 1, price: null, params: { stopPrice: stopPrice + 5, reduceOnly: true } });
+  assert.equal(again.status, 400);
+  assert.equal(again.body.kind, 'InvalidOrder');
+  assert.match(again.body.error, /No short MES position to reduce/);
+});
+
 test('a resting limit order can be modified and cancelled over HTTP', async () => {
   const placed = await env.post('/order', { symbol: MES, type: 'limit', side: 'buy', amount: 1, price: 1000 });
   assert.equal(placed.status, 200);

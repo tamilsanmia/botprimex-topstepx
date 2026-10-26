@@ -278,9 +278,22 @@ class MockExchange {
     this.push('GatewayUserOrder', { ...order });
     const root = this.rootOf(order.contractId);
     const spec = SPECS[root];
+    const buy = order.side === ORDER_SIDE.BUY;
     if (order.type === ORDER_TYPE.MARKET) {
-      const px = this.price(root) + (order.side === ORDER_SIDE.BUY ? spec.tick : -spec.tick);
+      const px = this.price(root) + (buy ? spec.tick : -spec.tick);
       setTimeout(() => this.fill(order, px), 20);
+    } else if ((order.type === ORDER_TYPE.STOP || order.type === ORDER_TYPE.STOP_LIMIT) && order.stopPrice !== null) {
+      // A stop already at or through the market triggers at once, as on ProjectX (a buy stop at
+      // 29102.25 with the ask at 29102.75 filled at 29102.75). A stop-limit turns into its limit.
+      const last = this.price(root);
+      if (buy ? last >= order.stopPrice : last <= order.stopPrice) {
+        if (order.type === ORDER_TYPE.STOP_LIMIT) {
+          order.type = ORDER_TYPE.LIMIT;
+        } else {
+          const px = snap(last + (buy ? spec.tick : -spec.tick), spec.tick);
+          setTimeout(() => { if (order.status === ORDER_STATUS.OPEN) this.fill(order, px); }, 20);
+        }
+      }
     }
     return { orderId: order.id, success: true, errorCode: 0, errorMessage: null };
   }

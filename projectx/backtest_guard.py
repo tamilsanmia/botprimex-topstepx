@@ -355,6 +355,9 @@ class BacktestGuard:
                 "key": key_date.isoformat(), "eod": eod.astimezone(timezone.utc)}
 
     def session_start(self, now: datetime) -> datetime:
+        if not self.enabled:
+            # No session clock without the rules (topstep.enabled false): count the last 24 hours.
+            return now - timedelta(hours=24)
         return self.trading_day(now)["start"]
 
     def _holiday(self, day: dict) -> dict | None:

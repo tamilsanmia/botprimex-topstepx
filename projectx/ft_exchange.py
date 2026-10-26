@@ -84,6 +84,34 @@ def _patch_seconds_timeframes() -> None:
     ft_worker.Worker._throttle = _throttle
 
 
+def report_stop_as_open(order: dict) -> dict:
+    """
+    A stop order as Freqtrade should record it when it was placed.
+
+    The gateway waits briefly after placing a stop and answers with its current state, so a
+    stop placed at or through the market comes back already filled ("closed"). Freqtrade
+    stores such an order as not open and never reads its fill: the trade stays open on a flat
+    account, and the next loop places another stop (refused) and an emergency exit (refused).
+    Reported as open, the order is fetched on the next stoploss check, which sees the fill
+    and closes the trade through Freqtrade's normal stoploss path.
+    """
+    if order.get("status") != "closed":
+        return order
+    amount = order.get("amount")
+    return {
+        **order,
+        "status": "open",
+        "filled": 0.0,
+        "remaining": amount,
+        "average": None,
+        "cost": 0.0,
+        "fee": None,
+        "trades": [],
+        "lastTradeTimestamp": None,
+        "info": {**(order.get("info") or {}), "projectx_status_on_create": "closed"},
+    }
+
+
 class Projectx(Exchange):
     _ft_has = {
         "stoploss_on_exchange": True,
@@ -139,6 +167,19 @@ class Projectx(Exchange):
         if timeframe.endswith("s") and self._config.get("runmode") in (RunMode.LIVE, RunMode.DRY_RUN):
             return min(limit, SECONDS_TF_LIVE_CANDLES)
         return limit
+
+    def create_stoploss(self, pair: str, amount: float, stop_price: float, order_types: dict, side,
+                        leverage: float) -> dict:
+        order = super().create_stoploss(pair, amount, stop_price, order_types, side, leverage)
+        if self._config.get("dry_run"):
+            return order
+        reported = report_stop_as_open(order)
+        if reported is not order:
+            logger.warning(
+                "stop order %s for %s filled on placement; Freqtrade reads the fill on its next stoploss check",
+                order.get("id"), pair,
+            )
+        return reported
 
     def _ohlcv_candle_grace_ms(self, timeframe: str) -> int:
         grace = super()._ohlcv_candle_grace_ms(timeframe)

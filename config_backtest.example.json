@@ -126,6 +126,8 @@
     "roll_guard_days": 2,
     "leverage": 50,
     "notify_guard_changes": false,
+    // Live and dry-run only (stops never closer than this to the market); backtests ignore it.
+    "stop_min_distance_ticks": 4,
     "seconds_mode": { "startup_candle_count": 300, "protection_minutes": 5 }
   },
   "topstep_orderflow": { "enabled": false },

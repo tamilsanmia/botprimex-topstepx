@@ -271,6 +271,7 @@ class Projectx(Exchange):
 
     def create_stoploss(self, pair: str, amount: float, stop_price: float, order_types: dict, side,
                         leverage: float) -> dict:
+        stop_price = self._guard_stop_price(pair, stop_price, side)
         order = super().create_stoploss(pair, amount, stop_price, order_types, side, leverage)
         if self._config.get("dry_run"):
             return order
@@ -281,6 +282,40 @@ class Projectx(Exchange):
                 order.get("id"), pair,
             )
         return reported
+
+    def _guard_stop_price(self, pair: str, stop_price: float, side: str) -> float:
+        """
+        Last line against a stop that fills on placement: a buy stop goes at least
+        stop_min_distance_ticks above max(ask, last), a sell stop that far below min(bid, last).
+        Without a quote the stop is placed as asked.
+        """
+        # Same key and default as STRATEGY_DEFAULTS["stop_min_distance_ticks"] in strategy_mixin.py.
+        ticks = (self._config.get("topstep_strategy") or {}).get("stop_min_distance_ticks", 4)
+        try:
+            ticks = float(ticks or 0)
+            tick = float(self.markets[pair]["precision"]["price"] or 0)
+            ticker = self.fetch_ticker(pair) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("stop for %s placed as asked at %s: no quote to check it against (%s)", pair, stop_price, e)
+            return stop_price
+        if ticks <= 0 or tick <= 0:
+            return stop_price
+        if side == "buy":
+            refs = [float(v) for v in (ticker.get("ask"), ticker.get("last")) if v]
+            bound = max(refs) + ticks * tick if refs else None
+            moved = bound is not None and stop_price < bound
+        else:
+            refs = [float(v) for v in (ticker.get("bid"), ticker.get("last")) if v]
+            bound = min(refs) - ticks * tick if refs else None
+            moved = bound is not None and stop_price > bound
+        if not moved:
+            return stop_price
+        bound = round(round(bound / tick) * tick, 10)
+        logger.warning(
+            "%s stop for %s at %s is within %s ticks of the market (%s %s); placing it at %s",
+            side, pair, stop_price, ticks, "ask/last" if side == "buy" else "bid/last", refs, bound,
+        )
+        return bound
 
     def _ohlcv_candle_grace_ms(self, timeframe: str) -> int:
         grace = super()._ohlcv_candle_grace_ms(timeframe)

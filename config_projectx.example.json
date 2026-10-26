@@ -182,6 +182,9 @@
     "roll_guard_days": 2,
     "leverage": 50,
     "notify_guard_changes": true,
+    // Live and dry-run: a stop is never placed at, through or within this many ticks of the
+    // market (it would fill on placement). Backtests ignore it. 0 turns it off.
+    "stop_min_distance_ticks": 4,
     // Experimental 1s-30s strategy timeframes.
     "seconds_mode": { "startup_candle_count": 300, "protection_minutes": 5 }
   },

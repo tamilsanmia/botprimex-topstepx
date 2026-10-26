@@ -352,6 +352,7 @@ The trade database is the file named by `FREQTRADE_DB_URL` in `.env` (default `u
 | `topstep.account_name`, `topstep.session.use_holiday_calendar` | config | unset, on |
 | `topstep.phases.<phase>.consistency_mode` | config | `cap_day` |
 | `topstep_costs` | config | 0.37 + 0.25 per contract, 1 tick |
+| `topstep_strategy.stop_min_distance_ticks` (live and dry-run: no stop at, through or within this many ticks of the market) | config | 4 |
 
 The gateway refuses to start (exit code 2) with an empty `GATEWAY_SECRET` unless `PROJECTX_MOCK=1`, with mock mode and `dry_run: false` together, or with an invalid `protective_stop` or `stale` block. The containers run with all capabilities dropped, `no-new-privileges` and a process limit; every container has a read-only root filesystem (only the mounted data directories and `/tmp` are writable), and logs rotate at 3 files of 10 MB. Orders older than `user_retention` are dropped from the gateway's memory, so fills older than 14 days no longer show in the fee and trade details of an order.
 

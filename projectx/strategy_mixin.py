@@ -50,6 +50,9 @@ STRATEGY_DEFAULTS = {
     "roll_guard_days": 2,
     "leverage": 50,
     "notify_guard_changes": True,
+    # Live and dry-run: a stop is never placed at, through or within this many ticks of the
+    # exit-side price (it would fill on placement). Projectx.create_stoploss reads the same key.
+    "stop_min_distance_ticks": 4,
     "seconds_mode": {"startup_candle_count": 300, "protection_minutes": 5},
 }
 ORDERFLOW_DEFAULTS = {
@@ -95,6 +98,7 @@ class TopstepXMixin:
         self._guard_at: datetime | None = None
         self._guard_signature: str | None = None
         self._planned_stop_ticks: dict[str, float] = {}
+        self._last_valid_stop: dict[Any, float] = {}
         self._bt_guard: BacktestGuard | None = None
         self._bt_now: datetime | None = None
 
@@ -221,6 +225,7 @@ class TopstepXMixin:
         self._guard_at = None
         self._guard_signature = None
         self._planned_stop_ticks = {}
+        self._last_valid_stop = {}
         self._bt_guard = None
         self._bt_now = None
 
@@ -323,6 +328,11 @@ class TopstepXMixin:
         if tick and not df.empty and "tsx_atr" in df and pd.notna(df["tsx_atr"].iloc[-1]):
             ticks = float(df["tsx_atr"].iloc[-1]) * float(self.tsx["stop_atr_mult"]) / tick
         return float(min(max(math.ceil(ticks), self.tsx["min_stop_ticks"]), self.tsx["max_stop_ticks"]))
+
+    def _min_stop_gap(self, pair: str) -> float:
+        """stop_min_distance_ticks in price; 0 when the tick size is unknown."""
+        tick = float(self._market(pair).get("tickSize") or 0)
+        return max(float(self.tsx.get("stop_min_distance_ticks") or 0), 0.0) * tick
 
     def _risk_contracts(self, pair: str, stop_ticks: float) -> int:
         tick_value = float(self._market(pair).get("tickValue") or 0)
@@ -447,11 +457,66 @@ class TopstepXMixin:
                                        after_fill=after_fill, **kwargs)
         stop_price = trade.get_custom_data(STOP_KEY)
         if stop_price is None:
-            return base
+            return self._at_least_min_gap(base, trade, current_rate)
         protective = abs(stoploss_from_absolute(float(stop_price), current_rate, is_short=trade.is_short,
                                                 leverage=trade.leverage))
         # Freqtrade ignores the sign; the smaller distance is the tighter stop.
-        return -min(abs(base), protective) if base is not None else -protective
+        stop = -min(abs(base), protective) if base is not None else -protective
+        return self._at_least_min_gap(stop, trade, current_rate)
+
+    def _at_least_min_gap(self, stoploss: Optional[float], trade: Trade, current_rate: float) -> Optional[float]:
+        """
+        Live and dry-run: never a stop closer than stop_min_distance_ticks to the price. A stored stop
+        on the wrong side of the price (distance 0, which Freqtrade ignores) also becomes that distance.
+        """
+        gap = self._min_stop_gap(trade.pair)
+        if stoploss is None or self._backtesting or not gap or not current_rate:
+            return stoploss
+        bound = current_rate + gap if trade.is_short else current_rate - gap
+        minimum = stoploss_from_absolute(bound, current_rate, is_short=trade.is_short, leverage=trade.leverage)
+        return -max(abs(stoploss), minimum)
+
+    def _stop_valid(self, stop: float, rate: float, gap: float, is_short: bool) -> bool:
+        return stop >= rate + gap - 1e-9 if is_short else stop <= rate - gap + 1e-9
+
+    def ft_stoploss_adjust(self, current_rate: float, trade: Trade, current_time: datetime, current_profit: float,
+                           force_stoploss: float, low: Optional[float] = None, high: Optional[float] = None,
+                           bound_profit: Optional[float] = None, after_fill: bool = False) -> None:
+        super().ft_stoploss_adjust(current_rate, trade, current_time, current_profit, force_stoploss, low=low,
+                                   high=high, bound_profit=bound_profit, after_fill=after_fill)
+        if self._backtesting or not trade.is_open or trade.stop_loss is None or not current_rate:
+            return
+        gap = self._min_stop_gap(trade.pair)
+        if not gap:
+            return
+        stop = float(trade.stop_loss)
+        if self._stop_valid(stop, current_rate, gap, trade.is_short):
+            self._last_valid_stop[trade.id] = stop
+            return
+        previous = self._last_valid_stop.get(trade.id)
+        if previous is None or math.isclose(stop, previous, abs_tol=1e-9):
+            # The price came to an unchanged stop: that stop fills, it is not moved away.
+            return
+        # Freqtrade moved the stop to or through the price. It re-anchors the stop ratio to the new
+        # average entry after a DCA fill (recalc_trade_from_orders), and a stop placed there fills at once.
+        leverage = trade.leverage or 1.0
+        ratio = abs(self.stoploss) / leverage
+        from_average = trade.open_rate * (1 + ratio) if trade.is_short else trade.open_rate * (1 - ratio)
+        candidates = [("the last valid stop", previous), ("the strategy stop from the average entry", from_average),
+                      (f"{gap} from the price", current_rate + gap if trade.is_short else current_rate - gap)]
+        reason, target = next((c for c in candidates if self._stop_valid(c[1], current_rate, gap, trade.is_short)),
+                              candidates[-1])
+        tick = float(self._market(trade.pair).get("tickSize") or 0)
+        for attempt in (target, target + tick if trade.is_short else target - tick):
+            trade.adjust_stop_loss(current_rate, -stoploss_from_absolute(attempt, current_rate, is_short=trade.is_short,
+                                                                         leverage=leverage), allow_refresh=True)
+            if self._stop_valid(float(trade.stop_loss), current_rate, gap, trade.is_short):
+                break
+        logger.warning(
+            "%s: stop %s is within %s of the price %s; moved to %s (%s)",
+            trade.pair, stop, gap, current_rate, trade.stop_loss, reason,
+        )
+        self._last_valid_stop[trade.id] = float(trade.stop_loss)
 
     def adjust_trade_position(self, trade: Trade, current_time: datetime, current_rate: float,
                               current_profit: float, min_stake: Optional[float], max_stake: float,

@@ -265,6 +265,81 @@ def test_custom_stoploss_without_a_stored_stop_is_the_strategy_stop(backtest_mod
     assert strat.custom_stoploss(PAIR, new_trade(), NOW, 6000.0, 0.0, False) == strat.stoploss
 
 
+def test_custom_stoploss_is_never_closer_than_the_minimum_distance_live(backtest_mode):
+    strat = make_strategy(runmode="dry_run")
+    four_ticks = stoploss_from_absolute(6001.0, 6000.0, is_short=True, leverage=50.0)
+    for stored in (5999.0, 6000.25):  # wrong side of the price, and 1 tick away
+        trade = new_trade(short=True)
+        trade.set_custom_data(STOP_KEY, stored)
+        assert strat.custom_stoploss(PAIR, trade, NOW, 6000.0, 0.0, False) == pytest.approx(-four_ticks)
+    far = new_trade(short=True)
+    far.set_custom_data(STOP_KEY, 6010.0)
+    assert strat.custom_stoploss(PAIR, far, NOW, 6000.0, 0.0, False) == pytest.approx(
+        -stoploss_from_absolute(6010.0, 6000.0, is_short=True, leverage=50.0))
+    # Backtests keep the stored stop as it is.
+    bt = make_strategy()
+    near = new_trade(short=True)
+    near.set_custom_data(STOP_KEY, 6000.25)
+    assert bt.custom_stoploss(PAIR, near, NOW, 6000.0, 0.0, False) == pytest.approx(
+        -stoploss_from_absolute(6000.25, 6000.0, is_short=True, leverage=50.0))
+
+
+def short_with_recorded_stop(strat, rate=5995.0):
+    """A short at 6000 whose stop the strategy has seen valid (strategy stop -0.5 at 50x from `rate`)."""
+    trade = new_trade(short=True)
+    strat.ft_stoploss_adjust(rate, trade, NOW, 0.0, 0)
+    assert trade.stop_loss == pytest.approx(rate * 1.01)
+    return trade
+
+
+def test_a_stop_moved_through_the_price_goes_back_to_the_last_valid_stop(backtest_mode):
+    strat = make_strategy(runmode="dry_run")
+    trade = short_with_recorded_stop(strat)
+    valid = trade.stop_loss
+    trade.stop_loss = 5995.5  # re-anchored by Freqtrade to 2 ticks above the price
+    strat.ft_stoploss_adjust(5995.0, trade, NOW, 0.0, 0)
+    assert trade.stop_loss == pytest.approx(valid)
+
+
+def test_without_a_valid_last_stop_the_stop_goes_to_the_strategy_stop_from_the_average(backtest_mode):
+    strat = make_strategy(runmode="dry_run")
+    trade = short_with_recorded_stop(strat)  # last valid 6054.95
+    trade.stop_loss = 6054.0  # re-anchored while the price is at 6054.5
+    strat.ft_stoploss_adjust(6054.5, trade, NOW, 0.0, 0)
+    assert trade.stop_loss == pytest.approx(6000.0 * 1.01)  # -0.5 at 50x from the average 6000
+
+
+def test_a_price_that_comes_to_an_unchanged_stop_does_not_move_it(backtest_mode):
+    strat = make_strategy(runmode="dry_run")
+    trade = short_with_recorded_stop(strat)
+    valid = trade.stop_loss
+    strat.ft_stoploss_adjust(valid - 0.25, trade, NOW, 0.0, 0)
+    assert trade.stop_loss == pytest.approx(valid), "the stop fills; it is not moved away"
+    long = new_trade()
+    strat.ft_stoploss_adjust(6005.0, long, NOW, 0.0, 0)
+    long_stop = long.stop_loss
+    strat.ft_stoploss_adjust(long_stop + 0.25, long, NOW, 0.0, 0)
+    assert long.stop_loss == pytest.approx(long_stop)
+
+
+def test_a_long_stop_moved_through_the_price_is_repaired_too(backtest_mode):
+    strat = make_strategy(runmode="dry_run")
+    trade = new_trade()
+    strat.ft_stoploss_adjust(6005.0, trade, NOW, 0.0, 0)
+    valid = trade.stop_loss
+    trade.stop_loss = 6004.5
+    strat.ft_stoploss_adjust(6005.0, trade, NOW, 0.0, 0)
+    assert trade.stop_loss == pytest.approx(valid)
+
+
+def test_backtests_leave_a_stop_near_the_price_alone(backtest_mode):
+    strat = make_strategy()
+    trade = short_with_recorded_stop(strat)
+    trade.stop_loss = 5995.5
+    strat.ft_stoploss_adjust(5995.0, trade, NOW, 0.0, 0)
+    assert trade.stop_loss == 5995.5
+
+
 def test_order_filled_stores_the_planned_stop_distance(backtest_mode):
     strat = make_strategy()
     trade = new_trade()

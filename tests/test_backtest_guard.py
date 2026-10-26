@@ -10,7 +10,7 @@ import pytest
 from freqtrade.exceptions import ConfigurationError
 
 import projectx  # noqa: F401
-from projectx.backtest_guard import BacktestGuard
+from projectx.backtest_guard import BacktestGuard, account_product
 from projectx.ft_exchange import Projectx
 
 ET = ZoneInfo("America/New_York")
@@ -266,6 +266,14 @@ def test_auto_phase_and_preset_come_from_the_account_name():
     assert (lfa.phase, lfa.start, lfa.rules["mll_lock_balance"]) == ("live_funded", 50000, None)
 
 
+def test_a_topstep_labs_account_name_is_a_zero_start_account():
+    assert account_product("6KCHCR-LABS005-V2-684000-69917404") == (6000, "LABS")
+    assert account_product("6KCHCRX-1") == (None, None)
+    g = BacktestGuard({"topstep": {"phase": "funded", "account_name": "6KCHCR-LABS005-V2-684000-69917404", "phases": {
+        "funded": {"daily_loss_limit": 300, "max_loss_limit": 400, "max_mini_equivalent": 1}}}})
+    assert (g.size, g.start) == (6000, 0)
+
+
 def test_auto_preset_can_come_from_a_numeric_start_balance():
     g = BacktestGuard({"topstep": {"phase": "evaluation", "preset": "auto", "start_balance": 100000}})
     assert g.size == 100000 and g.rules["daily_loss_limit"] == 2000
@@ -273,7 +281,8 @@ def test_auto_preset_can_come_from_a_numeric_start_balance():
 
 @pytest.mark.parametrize("topstep, message", [
     ({}, "topstep.phase is \"auto\""),
-    ({"phase": "auto", "account_name": "6KCHCR-LABS005"}, "no recognised product code"),
+    ({"phase": "auto", "account_name": "6KCHCR-LABS005"}, "Topstep Labs"),
+    ({"phase": "auto", "account_name": "PRACTICE"}, "no recognised product code"),
     ({"phase": "evaluation"}, "topstep.preset is \"auto\" but the account size is unknown"),
     ({"phase": "evaluation", "preset": "50k", "start_balance": "auto", "account_name": "nonsense"}, None),
     ({"phase": "funded", "preset": "auto", "start_balance": 0}, "account size is unknown"),

@@ -44,8 +44,20 @@ test('account product auto-detection', () => {
   assert.deepEqual(accountProduct('50KTC-V2-658045-28155706'), { sizeUsd: 50000, kind: 'TC' });
   assert.deepEqual(accountProduct('150KXFA-1'), { sizeUsd: 150000, kind: 'XFA' });
   assert.deepEqual(accountProduct('PRACTICE'), { sizeUsd: null, kind: null });
-  assert.deepEqual(accountProduct('6KCHCR-LABS005-V2-684000-69917404'), { sizeUsd: null, kind: null });
+  assert.deepEqual(accountProduct('6KCHCR-LABS005-V2-684000-69917404'), { sizeUsd: 6000, kind: 'LABS' });
+  assert.deepEqual(accountProduct('6KCHCR-LABS005'), { sizeUsd: 6000, kind: 'LABS' });
+  assert.deepEqual(accountProduct('6KCHCRX-1'), { sizeUsd: null, kind: null });
   assert.deepEqual(accountProduct('50KTCX-1'), { sizeUsd: null, kind: null });
+});
+
+test('rules: a Topstep Labs account has no presets, so phase "auto" asks for explicit settings', () => {
+  const labs = { name: '6KCHCR-LABS005-V2-684000-69917404', ...accountProduct('6KCHCR-LABS005-V2-684000-69917404') };
+  assert.throws(() => resolveRules({ phase: 'auto' }, labs), (err) => err instanceof RulesError && /Topstep Labs/.test(err.message));
+  assert.throws(() => resolveRules({}, { name: 'PRACTICE', sizeUsd: null, kind: null }), (err) => /no recognised product code/.test(err.message));
+  const r = resolveRules({ phase: 'funded', phases: { funded: { daily_loss_limit: 300, max_loss_limit: 400, max_mini_equivalent: 1 } } }, labs);
+  assert.equal(r.size, 6000);
+  assert.equal(r.startBalance, 0);
+  assert.ok(r.warnings.some((w) => w.includes('no preset for a 6K account')), JSON.stringify(r.warnings));
 });
 
 test('rules: auto phase and preset from a 50K combine', () => {

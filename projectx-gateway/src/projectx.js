@@ -66,17 +66,21 @@ export function contractMonth(name, now = new Date()) {
 
 /**
  * The account name encodes the product: `50KTC-V2-...` is a $50K Trading Combine,
- * `XFA` an Express Funded Account, `LFA` Live Funded. The gateway reports no account
- * size or limits at all, so this is the only signal for defaulting Topstep's rules.
+ * `XFA` an Express Funded Account, `LFA` Live Funded. A Topstep Labs Challenge,
+ * `<N>KCHCR-LABS...` (kind `LABS`), reports a profit-only balance that starts at $0.
+ * The gateway reports no account size or limits at all, so this is the only signal
+ * for defaulting Topstep's rules.
  */
 export function accountProduct(name) {
-  // Only known product codes: a name like "6KCHCR-LABS005-..." is not a 6K account.
-  const match = /^(\d+)K(TC|XFA|LFA|PA)(?![A-Z])/.exec(String(name || '').trim().toUpperCase());
-  if (!match) return { sizeUsd: null, kind: null };
-  const thousands = Number(match[1]);
+  const upper = String(name || '').trim().toUpperCase();
+  // Only known product codes; other names with a size prefix stay unrecognised.
+  const match = /^(\d+)K(TC|XFA|LFA|PA)(?![A-Z])/.exec(upper);
+  const labs = match ? null : /^(\d+)KCHCR-LABS/.exec(upper);
+  if (!match && !labs) return { sizeUsd: null, kind: null };
+  const thousands = Number((match || labs)[1]);
   return {
     sizeUsd: Number.isFinite(thousands) && thousands > 0 ? thousands * 1000 : null,
-    kind: match[2] || null,
+    kind: match ? match[2] || null : 'LABS',
   };
 }
 

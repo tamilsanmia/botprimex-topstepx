@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { pairOf, rootOf } from './config.js';
 import { GatewayError, invalidOrder, notFound, permissionDenied } from './errors.js';
 import { ORDER_SIDE, ORDER_STATUS, ORDER_TYPE, POSITION_TYPE } from './projectx.js';
+import { STARTS_AT_ZERO } from './rules.js';
 import { PROTECT_TAG } from './userStream.js';
 
 const STATUS_CCXT = { 0: 'open', 1: 'open', 2: 'closed', 3: 'canceled', 4: 'expired', 5: 'rejected', 6: 'open' };
@@ -446,16 +447,16 @@ export class OrderRouter {
   }
 
   /**
-   * Wallet for Freqtrade's stake sizing. An Express Funded Account's balance starts
-   * at $0 (its 50K/100K/150K is buying power), which would leave Freqtrade unable to
-   * size anything, so the account size is added as an offset. The AccountGuard
-   * still works on the real balance.
+   * Wallet for Freqtrade's stake sizing. The balance of an Express Funded Account
+   * (its 50K/100K/150K is buying power) and of a Topstep Labs account (profit only)
+   * starts at $0, which would leave Freqtrade unable to size anything, so the account
+   * size is added as an offset. The AccountGuard still works on the real balance.
    */
   balance(stake = 'USD') {
     const acct = this.user.account;
     if (!acct) throw new GatewayError(this.user.accountError || 'Account not loaded yet', { status: 503, kind: 'ExchangeNotAvailable' });
     const setting = this.config.balance_offset ?? 'auto';
-    const offset = setting === 'auto' ? (acct.kind === 'XFA' ? Number(acct.sizeUsd) || 0 : 0) : Number(setting) || 0;
+    const offset = setting === 'auto' ? (STARTS_AT_ZERO.has(acct.kind) ? Number(acct.sizeUsd) || 0 : 0) : Number(setting) || 0;
     const total = (Number(acct.balance) || 0) + offset;
     return {
       info: { ...acct, balanceOffset: offset },

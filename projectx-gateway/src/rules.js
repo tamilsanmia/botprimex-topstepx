@@ -94,8 +94,11 @@ export const PROTECTION_DEFAULTS = Object.freeze({
 });
 
 const KIND_PHASE = Object.freeze({ TC: 'evaluation', XFA: 'funded', PA: 'funded', LFA: 'live_funded' });
-/** An Express Funded Account builds its balance from $0; the others start at size. */
-const STARTS_AT_ZERO = new Set(['XFA']);
+/**
+ * Express Funded and Topstep Labs accounts build their balance from $0; the others start at size.
+ * The router adds the account size to these balances for Freqtrade's stake sizing.
+ */
+export const STARTS_AT_ZERO = new Set(['XFA', 'LABS']);
 
 const isAuto = (v) => v === undefined || v === null || v === 'auto';
 const defined = (obj) => Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v !== null && v !== undefined));
@@ -123,7 +126,11 @@ export function resolveRules(topstep = {}, account = null) {
   let phase = topstep.phase;
   if (isAuto(phase)) {
     phase = KIND_PHASE[account?.kind] || null;
-    if (!phase) problems.push(`topstep.phase is "auto" but the account name (${account?.name ?? 'none'}) has no recognised product code; set phase to evaluation, funded or live_funded`);
+    if (!phase && account?.kind === 'LABS') {
+      problems.push(`topstep.phase is "auto" but ${account.name ?? 'the account'} is a Topstep Labs account: there are no Labs rule presets, so set topstep.phase and the limits under topstep.phases yourself (or set topstep.enabled to false)`);
+    } else if (!phase) {
+      problems.push(`topstep.phase is "auto" but the account name (${account?.name ?? 'none'}) has no recognised product code; set phase to evaluation, funded or live_funded`);
+    }
   }
   if (phase && !PHASE_DEFAULTS[phase]) problems.push(`topstep.phase must be evaluation, funded or live_funded, got "${phase}"`);
 

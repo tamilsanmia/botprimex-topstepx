@@ -93,19 +93,24 @@ PROTECTION_DEFAULTS = {
 }
 CONSISTENCY_MODES = ("cap_day", "raise_target", "off")
 KIND_PHASE = {"TC": "evaluation", "XFA": "funded", "PA": "funded", "LFA": "live_funded"}
-STARTS_AT_ZERO = {"XFA"}
+# Express Funded and Topstep Labs accounts build their balance from $0; the others start at size.
+STARTS_AT_ZERO = {"XFA", "LABS"}
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 RANK = {"active": 0, "entries_blocked": 1, "day_locked": 2, "account_locked": 3}
 _ACCOUNT = re.compile(r"^(\d+)K(TC|XFA|LFA|PA)(?![A-Z])")
+# Topstep Labs Challenge, e.g. "6KCHCR-LABS005-V2-...": a profit-only balance that starts at $0.
+_LABS = re.compile(r"^(\d+)KCHCR-LABS")
 
 
 def account_product(name: Any) -> tuple[int | None, str | None]:
     """(size in USD, product code) from an account name like "50KTC-V2-1", as the gateway reads it."""
-    match = _ACCOUNT.match(str(name or "").strip().upper())
-    if not match:
+    upper = str(name or "").strip().upper()
+    match = _ACCOUNT.match(upper)
+    labs = None if match else _LABS.match(upper)
+    if not match and not labs:
         return None, None
-    thousands = int(match.group(1))
-    return (thousands * 1000 if thousands > 0 else None), match.group(2)
+    thousands = int((match or labs).group(1))
+    return (thousands * 1000 if thousands > 0 else None), (match.group(2) if match else "LABS")
 
 
 def _round2(v: float) -> float:
@@ -177,7 +182,13 @@ class BacktestGuard:
         phase = ts.get("phase")
         if _is_auto(phase):
             phase = KIND_PHASE.get(kind)
-            if not phase:
+            if not phase and kind == "LABS":
+                problems.append(
+                    f'topstep.phase is "auto" but topstep.account_name ({ts.get("account_name")}) is a Topstep Labs '
+                    "account: there are no Labs rule presets, so set topstep.phase and the limits under "
+                    "topstep.phases yourself (or set topstep.enabled to false)"
+                )
+            elif not phase:
                 problems.append(
                     f'topstep.phase is "auto" but topstep.account_name ({ts.get("account_name") or "none"}) has no '
                     "recognised product code (50KTC, 100KXFA, 150KLFA ...); set phase to evaluation, funded or live_funded"

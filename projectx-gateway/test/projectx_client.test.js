@@ -342,7 +342,8 @@ test('accountProduct reads the product code from the account name', () => {
   assert.deepEqual(accountProduct('50KLFA-1'), { sizeUsd: 50000, kind: 'LFA' });
   assert.deepEqual(accountProduct('50KPA-1'), { sizeUsd: 50000, kind: 'PA' });
   assert.deepEqual(accountProduct(' 50ktc-lower '), { sizeUsd: 50000, kind: 'TC' }, 'trimmed and case-insensitive');
-  for (const bad of ['XFA', '6KCHCR-LABS005-1', '50KTCX', '50K-TC', 'ABC', '', null, undefined]) {
+  assert.deepEqual(accountProduct('6KCHCR-LABS005-1'), { sizeUsd: 6000, kind: 'LABS' }, 'Topstep Labs Challenge');
+  for (const bad of ['XFA', '6KCHCRX-LABS005-1', '50KTCX', '50K-TC', 'ABC', '', null, undefined]) {
     assert.deepEqual(accountProduct(bad), { sizeUsd: null, kind: null }, `name ${JSON.stringify(bad)}`);
   }
   assert.deepEqual(accountProduct('0KTC'), { sizeUsd: null, kind: 'TC' }, 'a zero size is not a size');

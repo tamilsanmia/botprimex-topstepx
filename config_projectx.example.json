@@ -94,7 +94,8 @@
     "max_order_size": 50,
     // "auto": dry-run -> guard runs on Freqtrade's simulated trades; live -> ProjectX account.
     "account_source": "auto",
-    // "auto": adds the account size to an Express Funded Account's $0 balance for sizing.
+    // "auto": adds the account size to the $0-start balance of an Express Funded or a Topstep
+    // Labs account (e.g. 6KCHCR-LABS... -> +6000) for sizing. A number sets the offset; 0 turns it off.
     "balance_offset": "auto",
     // order_reserve: of the "other" window, the last N requests are kept for orders, so reads
     // and background syncs cannot starve a stop or an exit. max_queue bounds waiting
@@ -117,7 +118,8 @@
     // false disables every Topstep rule and protection (not recommended).
     "enabled": true,
     // "auto" reads phase and size from the account name: 50KTC -> evaluation 50K,
-    // XFA -> funded (starts at $0), LFA -> live_funded.
+    // XFA -> funded (starts at $0), LFA -> live_funded. A Topstep Labs account (6KCHCR-LABS...)
+    // starts at $0 but has no rule presets: set phase and the limits under "phases" yourself.
     "phase": "auto",
     "preset": "auto",
     "start_balance": "auto",

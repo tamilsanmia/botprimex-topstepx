@@ -102,9 +102,9 @@ The TopstepX API does not report your account's rules, so you set them in the `t
 }
 ```
 
-* `phase`: `evaluation`, `funded` or `live_funded`. `auto` works only for standard account names (`50KTC...`, `...XFA...`).
+* `phase`: `evaluation`, `funded` or `live_funded`. `auto` works only for standard account names (`50KTC...`, `...XFA...`). Topstep Labs accounts (`6KCHCR-LABS...`) have no presets: set `phase` and the limits in `phases` yourself, or set `enabled` to `false`.
 * `preset`: `50k`, `100k` or `150k`. It fills in the numbers below, and any value you set in `phases` overrides it.
-* `start_balance`: the balance the account started with. Express Funded accounts start at `0`.
+* `start_balance`: the balance the account started with. Express Funded and Topstep Labs accounts start at `0` (a Labs balance is profit only). For stake sizing the gateway adds the account size to these balances (`projectx_gateway.balance_offset`, `auto` by default), so a 6K Labs account with $1,446 profit sizes from $7,446.
 
 | Preset | Profit target | Daily Loss Limit | Max Loss Limit | Max contracts |
 | --- | --- | --- | --- | --- |

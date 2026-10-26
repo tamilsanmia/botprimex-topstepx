@@ -578,6 +578,16 @@ test('balance: the Express Funded account size is added as a sizing offset, othe
   const fixed = makeRouter({ config: { balance_offset: 1000 } });
   assert.equal(fixed.router.balance('USD').USD.total, 51000);
 
+  const labsAccount = { id: 27790619, name: '6KCHCR-LABS005-V2-684000-69917404', balance: 1446, kind: 'LABS', sizeUsd: 6000 };
+  const labs = makeRouter();
+  labs.user.account = { ...labsAccount };
+  assert.equal(labs.router.balance('USD').total.USD, 7446, 'a Labs balance is profit only, so the size is added');
+  assert.equal(labs.router.balance('USD').info.balanceOffset, 6000);
+  const labsOff = makeRouter({ config: { balance_offset: 0 } });
+  labsOff.user.account = { ...labsAccount };
+  assert.equal(labsOff.router.balance('USD').total.USD, 1446);
+  assert.equal(labsOff.router.balance('USD').info.balanceOffset, 0);
+
   const none = makeRouter();
   none.user.account = null;
   assert.throws(() => none.router.balance('USD'), (err) => err.kind === 'ExchangeNotAvailable' && err.status === 503);

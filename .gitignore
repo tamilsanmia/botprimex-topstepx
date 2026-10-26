@@ -1,6 +1,9 @@
 .env
+.env.bak*
 user_data/
 projectx-gateway/node_modules/
 __pycache__/
 *.pyc
 *.log
+# Workflow and agent notes
+.agents/

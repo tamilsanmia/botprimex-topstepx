@@ -21,10 +21,12 @@ three points:
   * A DCA fires on the next entry signal in the trade's direction (a candle that
     closed after the last fill), only while the trade is in a loss when
     `only_in_loss` is true, at most `max_adds` times.
-  * Each DCA puts the stop at stop_atr_mult x ATR from its fill price and adds as
-    many contracts as keep the whole position's risk to that stop within
-    max_risk_per_trade (guard value, else topstep.protection.max_risk_per_trade),
-    capped by max_contracts_per_trade and the mini-equivalent limit.
+  * Each DCA adds only the contracts needed to bring the average entry within
+    `target_points` (else `target_atr_mult` x ATR) of the add price, and puts the stop
+    at stop_atr_mult x ATR from its fill price. The add is capped so the whole
+    position's risk to that stop stays within max_risk_per_trade (guard value, else
+    topstep.protection.max_risk_per_trade), and by max_contracts_per_trade and the
+    mini-equivalent limit.
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ import sys
 from datetime import datetime, timedelta
 from typing import Optional
 
+import pandas as pd
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from NoTankAI import NoTankAi  # noqa: E402
 
@@ -46,7 +50,16 @@ from projectx.strategy_mixin import STOP_KEY, TopstepXMixin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-SIGNAL_DCA_DEFAULTS = {"enabled": False, "first_contracts": 1, "max_adds": 2, "only_in_loss": True}
+SIGNAL_DCA_DEFAULTS = {
+    "enabled": False,
+    "first_contracts": 1,
+    "max_adds": 2,
+    "only_in_loss": True,
+    # Each add buys only the contracts needed to bring the average entry within this many
+    # points of the add price: target_points when set, else target_atr_mult x ATR.
+    "target_points": None,
+    "target_atr_mult": 1.0,
+}
 SIGNAL_DCA_TAG = "signal_dca"
 
 
@@ -65,6 +78,19 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
         if not risk:
             risk = ((self.config.get("topstep") or {}).get("protection") or {}).get("max_risk_per_trade")
         return float(risk) if risk else None
+
+    def _dca_target_points(self, pair: str, tick: float) -> float:
+        """Distance (points) the average entry may stay from the add price: target_points, else ATR x mult."""
+        fixed = self.signal_dca.get("target_points")
+        if fixed:
+            return max(float(fixed), tick)
+        atr = None
+        df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if not df.empty and "tsx_atr" in df and pd.notna(df["tsx_atr"].iloc[-1]):
+            atr = float(df["tsx_atr"].iloc[-1])
+        target = (atr or 0.0) * float(self.signal_dca["target_atr_mult"])
+        # At least a few ticks, so a tiny ATR cannot demand a huge add.
+        return max(target, float(self.tsx["min_stop_ticks"]) * tick / 2)
 
     def _new_entry_signal(self, trade: Trade) -> bool:
         """
@@ -160,21 +186,34 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
             return None
         cs = self._contract_size(trade.pair)
         held = round(self._contracts(trade))
+        price = float(current_entry_rate)
+
+        # Contracts needed to pull the average entry within `target` points of the add price:
+        # held * gap / (held + n) <= target  ->  n >= held * (gap - target) / target.
+        gap = (price - trade.open_rate) if trade.is_short else (trade.open_rate - price)
+        target = self._dca_target_points(trade.pair, tick)
+        if gap <= target:
+            self._log_skip("%s signal DCA skipped: average %s is already within %.2f pts of %s",
+                           trade.pair, trade.open_rate, target, price)
+            return None
+        needed = math.ceil(held * (gap - target) / target - 1e-9)
+
         stop_ticks = self._stop_ticks(trade.pair)
         distance = stop_ticks * tick
-        stop = current_entry_rate + distance if trade.is_short else current_entry_rate - distance
+        stop = price + distance if trade.is_short else price - distance
         existing = max(0.0, (stop - trade.open_rate) if trade.is_short else (trade.open_rate - stop)) * held * cs
         per_contract = stop_ticks * tick_value
-        add = math.floor((max_risk - existing) / per_contract + 1e-9)
+        by_risk = math.floor((max_risk - existing) / per_contract + 1e-9)
         fit = self._contracts_that_fit(trade.pair, exclude_pair=trade.pair) - held
-        affordable = math.floor(max_stake * max(trade.leverage, 1.0) / (cs * current_entry_rate))
-        add = min(add, fit, affordable, int(self.tsx["max_contracts_per_trade"]) - held)
+        affordable = math.floor(max_stake * max(trade.leverage, 1.0) / (cs * price))
+        add = min(needed, by_risk, fit, affordable, int(self.tsx["max_contracts_per_trade"]) - held)
         if add < 1:
-            self._log_skip("%s signal DCA skipped: risk to a %s-tick stop already uses $%.0f of $%.0f",
-                           trade.pair, stop_ticks, existing, max_risk)
+            self._log_skip("%s signal DCA skipped: needs %s contracts, risk/limits allow none "
+                           "(risk to a %s-tick stop $%.0f of $%.0f)", trade.pair, needed, stop_ticks, existing, max_risk)
             return None
+        new_avg = (trade.open_rate * held + price * add) / (held + add)
         self._dca_stop_ticks[trade.id] = stop_ticks
-        logger.info("%s signal DCA #%s: +%s contracts at ~%s, stop %s (%s ticks), risk $%.0f/$%.0f",
-                    trade.pair, adds_done + 1, add, current_entry_rate, stop, stop_ticks,
-                    existing + add * per_contract, max_risk)
+        logger.info("%s signal DCA #%s: +%s contracts (needed %s) at ~%s, average %s -> %.2f (target %.2f pts), "
+                    "stop %s (%s ticks), risk $%.0f/$%.0f", trade.pair, adds_done + 1, add, needed, price,
+                    trade.open_rate, new_avg, target, stop, stop_ticks, existing + add * per_contract, max_risk)
         return self._stake_for(trade.pair, add, current_entry_rate, trade.leverage), SIGNAL_DCA_TAG

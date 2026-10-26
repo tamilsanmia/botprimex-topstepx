@@ -579,10 +579,13 @@ test('balance: the Express Funded account size is added as a sizing offset, othe
   assert.equal(fixed.router.balance('USD').USD.total, 51000);
 
   const labsAccount = { id: 27790619, name: '6KCHCR-LABS005-V2-684000-69917404', balance: 1446, kind: 'LABS', sizeUsd: 6000 };
-  const labs = makeRouter();
+  const labs = makeRouter({ guard: () => ({ rules: { max_loss_limit: 2000 } }) });
   labs.user.account = { ...labsAccount };
-  assert.equal(labs.router.balance('USD').total.USD, 7446, 'a Labs balance is profit only, so the size is added');
-  assert.equal(labs.router.balance('USD').info.balanceOffset, 6000);
+  assert.equal(labs.router.balance('USD').total.USD, 3446, 'a Labs balance is profit only: the static max loss is added');
+  assert.equal(labs.router.balance('USD').info.balanceOffset, 2000);
+  const labsNoGuard = makeRouter();
+  labsNoGuard.user.account = { ...labsAccount };
+  assert.equal(labsNoGuard.router.balance('USD').info.balanceOffset, 0, 'without Labs rules nothing is added');
   const labsOff = makeRouter({ config: { balance_offset: 0 } });
   labsOff.user.account = { ...labsAccount };
   assert.equal(labsOff.router.balance('USD').total.USD, 1446);

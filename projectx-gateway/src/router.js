@@ -452,11 +452,22 @@ export class OrderRouter {
    * starts at $0, which would leave Freqtrade unable to size anything, so the account
    * size is added as an offset. The AccountGuard still works on the real balance.
    */
+  /**
+   * balance_offset "auto": an Express Funded account adds its size (its buying power).
+   * A Topstep Labs Challenge has no account size (the "6K" in its name is the profit
+   * target), so it adds its static Max Loss Limit: the wallet is then the profit plus
+   * what may still be lost, which is what the account can trade with.
+   */
+  autoBalanceOffset(acct) {
+    if (acct.kind === 'LABS') return Number(this.guard?.()?.rules?.max_loss_limit) || 0;
+    return STARTS_AT_ZERO.has(acct.kind) ? Number(acct.sizeUsd) || 0 : 0;
+  }
+
   balance(stake = 'USD') {
     const acct = this.user.account;
     if (!acct) throw new GatewayError(this.user.accountError || 'Account not loaded yet', { status: 503, kind: 'ExchangeNotAvailable' });
     const setting = this.config.balance_offset ?? 'auto';
-    const offset = setting === 'auto' ? (STARTS_AT_ZERO.has(acct.kind) ? Number(acct.sizeUsd) || 0 : 0) : Number(setting) || 0;
+    const offset = setting === 'auto' ? this.autoBalanceOffset(acct) : Number(setting) || 0;
     const total = (Number(acct.balance) || 0) + offset;
     return {
       info: { ...acct, balanceOffset: offset },

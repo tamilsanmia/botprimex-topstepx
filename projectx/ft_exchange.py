@@ -11,13 +11,14 @@ reduceOnly exits, contract sizes) applies unchanged.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import projectx  # noqa: F401  - registers ccxt classes before Exchange initialises
 
-from freqtrade.enums import MarginMode, TradingMode
+from freqtrade.enums import MarginMode, RunMode, TradingMode
 from freqtrade.exceptions import ConfigurationError, OperationalException
 from freqtrade.exchange.exchange import Exchange
+from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_prev_date, timeframe_to_seconds
 from freqtrade.util import FtTTLCache
 
 from .costs import cost_ratio, costs_config
@@ -26,6 +27,61 @@ from .startup_checks import check_startup
 logger = logging.getLogger(__name__)
 
 RATE_CACHE_TTL_SECS = 1
+
+
+def _date_minus_candles(timeframe: str, candle_count: int, date: datetime | None = None) -> datetime:
+    """
+    Freqtrade's date_minus_candles() in seconds instead of whole minutes.
+
+    The original subtracts timeframe_to_minutes(timeframe) * candle_count minutes, and
+    timeframe_to_minutes("1s".."30s") is 0, so on seconds timeframes it returns "now".
+    In refresh_latest_ohlcv that made every iteration see a "time jump", evict the
+    candle cache and reload the full history over REST, and it made the websocket
+    candle check compare against the current candle instead of the previous one.
+    Together that delayed entries by several seconds on 1s candles. For whole-minute
+    timeframes the result is identical to the original.
+    """
+    if not date:
+        date = datetime.now(UTC)
+    tf_secs = timeframe_to_seconds(timeframe)
+    return timeframe_to_prev_date(timeframe, date) - timedelta(seconds=tf_secs * candle_count)
+
+
+# Seconds timeframes: Freqtrade's main loop wakes 1 s after each candle boundary
+# (Worker passes timeframe_offset=1), a whole candle late on 1s. Wake 0.3 s after the
+# boundary instead. Minute timeframes keep the 1 s offset.
+SECONDS_TF_LOOP_OFFSET_SECS = 0.3
+# Seconds timeframes: a just-closed candle counts as final this long after its close
+# even if no newer candle was issued yet (Freqtrade: half a candle, 500 ms on 1s).
+# Must stay below the loop offset, or the loop reads the closed candle as unfinished.
+SECONDS_TF_GRACE_MS = 250
+# Seconds timeframes, live and dry-run: candles kept in the cache (see ohlcv_candle_limit).
+SECONDS_TF_LIVE_CANDLES = 2000
+
+
+def _patch_seconds_timeframes() -> None:
+    """Install the seconds-timeframe fixes where Freqtrade bound the originals."""
+    import freqtrade.data.history.history_utils as history_utils
+    import freqtrade.exchange as ft_exchange_pkg
+    import freqtrade.exchange.exchange as ft_exchange_mod
+    import freqtrade.exchange.exchange_utils as ft_exchange_utils
+    import freqtrade.worker as ft_worker
+
+    for module in (ft_exchange_utils, ft_exchange_mod, ft_exchange_pkg, history_utils):
+        if getattr(module, "date_minus_candles", None) is not _date_minus_candles:
+            module.date_minus_candles = _date_minus_candles
+
+    original = ft_worker.Worker._throttle
+    if getattr(original, "_projectx_seconds", False):
+        return
+
+    def _throttle(self, func, throttle_secs, timeframe=None, timeframe_offset=1.0, *args, **kwargs):
+        if timeframe and timeframe.endswith("s"):
+            timeframe_offset = min(timeframe_offset, SECONDS_TF_LOOP_OFFSET_SECS)
+        return original(self, func, throttle_secs, timeframe, timeframe_offset, *args, **kwargs)
+
+    _throttle._projectx_seconds = True
+    ft_worker.Worker._throttle = _throttle
 
 
 class Projectx(Exchange):
@@ -67,11 +123,26 @@ class Projectx(Exchange):
         self._exchange_ws = None
         self._ws_async = None
         check_startup(config)
+        # Patched here, not at import: freqtrade.exchange imports this module while it initialises.
+        _patch_seconds_timeframes()
         super().__init__(config, *args, **kwargs)
         # Freqtrade caches entry/exit rates for 5 minutes; prices here come from a
         # live tick stream at no request cost, so a 1 second cache is enough.
         self._entry_rate_cache = FtTTLCache(maxsize=100, ttl=RATE_CACHE_TTL_SECS)
         self._exit_rate_cache = FtTTLCache(maxsize=100, ttl=RATE_CACHE_TTL_SECS)
+
+    def ohlcv_candle_limit(self, timeframe: str, candle_type, since_ms: int | None = None) -> int:
+        limit = super().ohlcv_candle_limit(timeframe, candle_type, since_ms)
+        # The live/dry-run candle cache holds this many candles (plus the startup count) and
+        # the strategy re-analyses all of them every loop. On seconds timeframes keep it small
+        # so analysis stays well inside one candle. Downloads and backtests keep the full limit.
+        if timeframe.endswith("s") and self._config.get("runmode") in (RunMode.LIVE, RunMode.DRY_RUN):
+            return min(limit, SECONDS_TF_LIVE_CANDLES)
+        return limit
+
+    def _ohlcv_candle_grace_ms(self, timeframe: str) -> int:
+        grace = super()._ohlcv_candle_grace_ms(timeframe)
+        return min(grace, SECONDS_TF_GRACE_MS) if timeframe.endswith("s") else grace
 
     def validate_timeframes(self, timeframe: str | None) -> None:
         """

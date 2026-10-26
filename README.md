@@ -278,7 +278,7 @@ TopstepX allows 50 history requests per 30 seconds and 200 other requests per mi
   * Set `exchange.use_public_trades: true` for Freqtrade's footprint, delta and imbalance columns.
   * Set `topstep_orderflow.enabled: true` for the extra features and filters (session CVD, large prints, volume profile).
   * History starts when recording starts.
-* **1-second timeframes**: set `"timeframe": "1s"` (also `5s`, `15s`, `30s`). This is experimental: keep the pair list short.
+* **1-second timeframes**: set `"timeframe": "1s"` (also `5s`, `10s`, `15s`, `30s`). This is experimental: keep the pair list short. `projectx/ft_exchange.py` adjusts Freqtrade for seconds candles: candle-count date maths in seconds (Freqtrade rounds to whole minutes, which reloaded the whole history every loop), the main loop wakes 0.3 s after each candle instead of 1 s, a closed candle counts as final after 250 ms, and live/dry-run analyse the last 2,000 candles.
 
 ---
 

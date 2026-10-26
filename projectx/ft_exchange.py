@@ -163,21 +163,36 @@ def _patch_onexchange_recovery() -> None:
 
         if not isinstance(self.exchange, Projectx):
             return original(self, trade)
-        if _close_if_net_flat(self, trade):
+
+        def guarded(step: str, fn, *args):
+            # Like Freqtrade's own recovery: a failure here is logged and rolled back, never fatal,
+            # so a restart cannot loop on the same exception.
+            try:
+                return fn(*args)
+            except Exception:  # noqa: BLE001
+                logger.warning("projectx recovery step %s failed for %s", step, trade, exc_info=True)
+                Trade.rollback()
+                return None
+
+        if guarded("pre-check", _close_if_net_flat, self, trade):
             return False
         result = original(self, trade)
         if result:  # the trade was deleted
             return result
-        if trade.is_open:
-            # The recovery may have added exit orders it did not know before.
-            _close_if_net_flat(self, trade)
-        else:
+
+        def post_check() -> None:
+            if trade.is_open:
+                # The recovery may have added exit orders it did not know before.
+                _close_if_net_flat(self, trade)
+                return
             # Re-applying the orders of a closed trade (FreqUI "reload trade") leaves amount and
             # open rate at the last entry's values; put back the values the close had.
             last = _last_exit_if_net_flat(trade)
             if last is not None:
                 _settle_from_orders(trade, last)
                 Trade.commit()
+
+        guarded("post-check", post_check)
         return result
 
     handle_onexchange_order._projectx_recovery = True

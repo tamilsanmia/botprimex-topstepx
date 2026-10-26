@@ -179,8 +179,8 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
             return
         if trade.get_custom_data(DCA_FILLED_KEY) == order.order_id:
             return
-        trade.set_custom_data(DCA_FILLED_KEY, order.order_id)
         if self.signal_dca["dca_stop"] == "strategy":
+            trade.set_custom_data(DCA_FILLED_KEY, order.order_id)
             self._dca_stop_ticks.pop(trade.id, None)
             logger.info("%s DCA filled at %s: stop is the strategy stoploss %.2f (average %s, %s at %sx) for %s contracts",
                         pair, order.safe_price, self._strategy_stop(trade.open_rate, trade.is_short, trade.leverage),
@@ -190,10 +190,12 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
         price = float(order.safe_price or 0)
         ticks = self._dca_stop_ticks.pop(trade.id, None) or self._stop_ticks(pair)
         if not tick or not price:
+            # Not marked as handled: a later call with a known tick size still sets the ATR stop.
             return
         distance = ticks * tick
         stop = price + distance if trade.is_short else price - distance
         trade.set_custom_data(STOP_KEY, stop)
+        trade.set_custom_data(DCA_FILLED_KEY, order.order_id)
         logger.info("%s DCA filled at %s: protective stop %s (%s ticks) for %s contracts",
                     pair, price, stop, ticks, round(self._contracts(trade)))
 

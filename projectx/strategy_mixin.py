@@ -544,7 +544,9 @@ class TopstepXMixin:
             return super().protections
         # Candle-count protections misbehave below 1m; use minutes instead.
         minutes = int(self.tsx["seconds_mode"].get("protection_minutes", 5))
-        prot = [{"method": "CooldownPeriod", "stop_duration": minutes}]
+        # Pause after each closed trade; cooldown_minutes 0 turns it off.
+        cooldown = int(self.tsx["seconds_mode"].get("cooldown_minutes", minutes))
+        prot = [{"method": "CooldownPeriod", "stop_duration": cooldown}] if cooldown > 0 else []
         if _value(getattr(self, "use_stop_protection", True)):
             prot.append({
                 "method": "StoplossGuard",

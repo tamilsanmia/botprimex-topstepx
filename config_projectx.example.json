@@ -187,6 +187,13 @@
     "stop_min_distance_ticks": 4,
     // Experimental 1s-30s strategy timeframes.
     "seconds_mode": { "startup_candle_count": 300, "protection_minutes": 5 }
+    // NoTankAi_TopstepX only: optional signal DCA (see NoTankAI_TopstepX.py). dca_stop "strategy"
+    // puts the stop after an add at the strategy stoploss from the new average entry
+    // (stoploss -0.1 at leverage 50 = 0.2% of price) and sizes the add so the whole position's
+    // loss to it stays within max_risk_per_trade; "atr" puts it stop_atr_mult x ATR from the
+    // add's fill price. To use it, add a comma after seconds_mode and uncomment:
+    // "signal_dca": { "enabled": false, "first_contracts": 1, "max_adds": 2, "only_in_loss": true,
+    //                 "target_points": null, "target_atr_mult": 1.0, "dca_stop": "strategy" }
   },
   "topstep_orderflow": {
     "enabled": false,

@@ -10,6 +10,8 @@ exec docker run --rm \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -v "$REPO/projectx:/opt/projectx/projectx:ro" \
   -v "$REPO/tests:/tests:ro" \
+  -v "$REPO/NoTankAI.py:/strategies/NoTankAI.py:ro" \
+  -v "$REPO/NoTankAI_TopstepX.py:/strategies/NoTankAI_TopstepX.py:ro" \
   --entrypoint bash "$IMAGE" \
   -c 'pip install --user -q pytest >/dev/null 2>&1; python -m pytest -q -p no:cacheprovider /tests "$@"' \
   _ "$@"

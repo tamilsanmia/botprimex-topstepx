@@ -16,17 +16,23 @@ layer from projectx.strategy_mixin:
 Optional signal DCA (topstep_strategy.signal_dca.enabled = true) replaces the last
 three points:
 
-  * The first entry is `first_contracts` contracts (default 1) with no protective
-    stop: only the strategy's own stoploss (-0.99) applies, as a last resort.
+  * The first entry is `first_contracts` contracts (default 1) with no ATR stop: the
+    strategy stoploss (config `stoploss`, e.g. -0.1) applies as a trailing ratio.
   * A DCA fires on the next entry signal in the trade's direction (a candle that
     closed after the last fill), only while the trade is in a loss when
     `only_in_loss` is true, at most `max_adds` times.
   * Each DCA adds only the contracts needed to bring the average entry within
-    `target_points` (else `target_atr_mult` x ATR) of the add price, and puts the stop
-    at stop_atr_mult x ATR from its fill price. The add is capped so the whole
-    position's risk to that stop stays within max_risk_per_trade (guard value, else
-    topstep.protection.max_risk_per_trade), and by max_contracts_per_trade and the
-    mini-equivalent limit.
+    `target_points` (else `target_atr_mult` x ATR) of the add price, capped by
+    max_contracts_per_trade, the mini-equivalent limit and max_risk_per_trade (guard
+    value, else topstep.protection.max_risk_per_trade) for the whole position:
+      - `dca_stop` "strategy" (the default): after an add the stop is the strategy
+        stoploss from the new average entry, average x (1 +- |stoploss| / leverage)
+        (-0.1 at 50x: 0.2% of price). The add is sized so the whole position's loss to
+        that stop stays within max_risk_per_trade.
+      - `dca_stop` "atr": the stop goes stop_atr_mult x ATR from the add's fill price,
+        and the add is sized by the risk to that stop.
+  * order_filled acts once per add: Freqtrade calls it again for the same order (the
+    fee update) and for every order during its order recovery.
 """
 
 from __future__ import annotations
@@ -43,8 +49,10 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from NoTankAI import NoTankAi  # noqa: E402
 
+from freqtrade.exceptions import OperationalException  # noqa: E402
 from freqtrade.exchange import timeframe_to_seconds  # noqa: E402
 from freqtrade.persistence import Order, Trade  # noqa: E402
+from freqtrade.strategy import stoploss_from_absolute  # noqa: E402
 
 from projectx.strategy_mixin import STOP_KEY, TopstepXMixin  # noqa: E402
 
@@ -59,8 +67,14 @@ SIGNAL_DCA_DEFAULTS = {
     # points of the add price: target_points when set, else target_atr_mult x ATR.
     "target_points": None,
     "target_atr_mult": 1.0,
+    # Stop after an add: "strategy" = the strategy stoploss from the new average entry (the add
+    # is sized by the risk to it); "atr" = stop_atr_mult x ATR from the add's fill price.
+    "dca_stop": "strategy",
 }
+DCA_STOPS = ("strategy", "atr")
 SIGNAL_DCA_TAG = "signal_dca"
+# Order id of the last add whose fill order_filled has handled.
+DCA_FILLED_KEY = "tsx_dca_filled_order"
 
 
 class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
@@ -68,6 +82,10 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
         super().__init__(config)
         self.signal_dca = {**SIGNAL_DCA_DEFAULTS, **((config.get("topstep_strategy") or {}).get("signal_dca") or {})}
         self._dca_stop_ticks: dict[int, float] = {}
+        if self.signal_dca["dca_stop"] not in DCA_STOPS:
+            raise OperationalException(
+                f'topstep_strategy.signal_dca.dca_stop must be "strategy" or "atr", got {self.signal_dca["dca_stop"]!r}'
+            )
         if self.signal_dca["enabled"]:
             self.max_entry_position_adjustment = int(self.signal_dca["max_adds"])
 
@@ -78,6 +96,14 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
         if not risk:
             risk = ((self.config.get("topstep") or {}).get("protection") or {}).get("max_risk_per_trade")
         return float(risk) if risk else None
+
+    def _strategy_dca_stop(self) -> bool:
+        return bool(self.signal_dca["enabled"]) and self.signal_dca["dca_stop"] == "strategy"
+
+    def _strategy_stop(self, average: float, is_short: bool, leverage: float) -> float:
+        """The strategy stoploss as a price from the average entry: average x (1 +- |stoploss| / leverage)."""
+        ratio = abs(float(self.stoploss)) / max(float(leverage or 1.0), 1.0)
+        return average * (1 + ratio) if is_short else average * (1 - ratio)
 
     def _dca_target_points(self, pair: str, tick: float) -> float:
         """Distance (points) the average entry may stay from the add price: target_points, else ATR x mult."""
@@ -129,6 +155,16 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
             return 0.0
         return self._stake_for(pair, contracts, current_rate, leverage)
 
+    def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime, current_rate: float,
+                        current_profit: float, after_fill: bool, **kwargs) -> Optional[float]:
+        if self._strategy_dca_stop() and len(trade.select_filled_orders(trade.entry_side)) >= 2:
+            stop = self._strategy_stop(trade.open_rate, trade.is_short, trade.leverage)
+            ratio = stoploss_from_absolute(stop, current_rate, is_short=trade.is_short, leverage=trade.leverage)
+            if ratio > 0:
+                return self._at_least_min_gap(-ratio, trade, current_rate)
+        return super().custom_stoploss(pair, trade, current_time, current_rate, current_profit,
+                                       after_fill=after_fill, **kwargs)
+
     def order_filled(self, pair: str, trade: Trade, order: Order, current_time: datetime, **kwargs) -> None:
         if not self.signal_dca["enabled"]:
             return super().order_filled(pair, trade, order, current_time, **kwargs)
@@ -137,7 +173,18 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
         if order.ft_order_side != trade.entry_side:
             return
         self._apply_costs(trade)
-        if len(trade.select_filled_orders(trade.entry_side)) < 2:
+        entries = trade.select_filled_orders(trade.entry_side)
+        # Only the latest add, and only once: Freqtrade re-applies fills (fee update, order recovery).
+        if len(entries) < 2 or order.order_id != entries[-1].order_id:
+            return
+        if trade.get_custom_data(DCA_FILLED_KEY) == order.order_id:
+            return
+        trade.set_custom_data(DCA_FILLED_KEY, order.order_id)
+        if self.signal_dca["dca_stop"] == "strategy":
+            self._dca_stop_ticks.pop(trade.id, None)
+            logger.info("%s DCA filled at %s: stop is the strategy stoploss %.2f (average %s, %s at %sx) for %s contracts",
+                        pair, order.safe_price, self._strategy_stop(trade.open_rate, trade.is_short, trade.leverage),
+                        trade.open_rate, self.stoploss, trade.leverage, round(self._contracts(trade)))
             return
         tick = float(self._market(pair).get("tickSize") or 0)
         price = float(order.safe_price or 0)
@@ -198,14 +245,18 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
             return None
         needed = math.ceil(held * (gap - target) / target - 1e-9)
 
+        fit = self._contracts_that_fit(trade.pair, exclude_pair=trade.pair) - held
+        affordable = math.floor(max_stake * max(trade.leverage, 1.0) / (cs * price))
+        if self.signal_dca["dca_stop"] == "strategy":
+            return self._strategy_stop_add(trade, adds_done, held, price, needed, target, fit, affordable,
+                                           cs, max_risk, current_entry_rate)
+
         stop_ticks = self._stop_ticks(trade.pair)
         distance = stop_ticks * tick
         stop = price + distance if trade.is_short else price - distance
         existing = max(0.0, (stop - trade.open_rate) if trade.is_short else (trade.open_rate - stop)) * held * cs
         per_contract = stop_ticks * tick_value
         by_risk = math.floor((max_risk - existing) / per_contract + 1e-9)
-        fit = self._contracts_that_fit(trade.pair, exclude_pair=trade.pair) - held
-        affordable = math.floor(max_stake * max(trade.leverage, 1.0) / (cs * price))
         add = min(needed, by_risk, fit, affordable, int(self.tsx["max_contracts_per_trade"]) - held)
         if add < 1:
             self._log_skip("%s signal DCA skipped: needs %s contracts, risk/limits allow none "
@@ -217,3 +268,22 @@ class NoTankAi_TopstepX(TopstepXMixin, NoTankAi):
                     "stop %s (%s ticks), risk $%.0f/$%.0f", trade.pair, adds_done + 1, add, needed, price,
                     trade.open_rate, new_avg, target, stop, stop_ticks, existing + add * per_contract, max_risk)
         return self._stake_for(trade.pair, add, current_entry_rate, trade.leverage), SIGNAL_DCA_TAG
+
+    def _strategy_stop_add(self, trade: Trade, adds_done: int, held: int, price: float, needed: int, target: float,
+                           fit: int, affordable: int, cs: float, max_risk: float, current_entry_rate: float):
+        """dca_stop "strategy": the largest add whose whole-position loss to the strategy stop fits max_risk."""
+        ratio = abs(float(self.stoploss)) / max(float(trade.leverage or 1.0), 1.0)
+        upper = min(needed, fit, affordable, int(self.tsx["max_contracts_per_trade"]) - held)
+        for add in range(upper, 0, -1):
+            new_avg = (trade.open_rate * held + price * add) / (held + add)
+            risk = ratio * new_avg * (held + add) * cs
+            if risk <= max_risk + 1e-9:
+                stop = self._strategy_stop(new_avg, trade.is_short, trade.leverage)
+                logger.info("%s signal DCA #%s: +%s contracts (needed %s) at ~%s, average %s -> %.2f (target %.2f pts), "
+                            "strategy stop %.2f from new average, risk $%.0f/$%.0f", trade.pair, adds_done + 1, add,
+                            needed, price, trade.open_rate, new_avg, target, stop, risk, max_risk)
+                return self._stake_for(trade.pair, add, current_entry_rate, trade.leverage), SIGNAL_DCA_TAG
+        risk_one = ratio * ((trade.open_rate * held + price) / (held + 1)) * (held + 1) * cs
+        self._log_skip("%s signal DCA skipped: needs %s contracts, risk/limits allow none "
+                       "(risk to the strategy stop with one more $%.0f of $%.0f)", trade.pair, needed, risk_one, max_risk)
+        return None

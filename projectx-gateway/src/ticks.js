@@ -291,7 +291,8 @@ export class TickStore {
     this.flush();
     const out = [];
     const t = tableName('ticks', root);
-    for (const day of this.days(afterTs, until)) {
+    // `until` is exclusive, so a bound at midnight does not open the next day.
+    for (const day of this.days(afterTs, until - 1)) {
       const entry = this.entry(day);
       if (!entry || !this.hasTable(entry, t)) continue;
       const rows = this.statement(entry, `SELECT ts, price, size, side, seq FROM ${t} WHERE (ts, seq) > (?, ?) AND ts < ? ORDER BY ts, seq LIMIT ?`, true)

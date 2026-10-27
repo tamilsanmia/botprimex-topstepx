@@ -1,8 +1,7 @@
 {
   // Backtesting config for TopstepX futures (FreqUI webserver + download-data).
   // Copy to user_data/config-futures-backtest.json. Credentials stay in .env.
-  "bot_name": "botprimex-topstepx-backtest",
-  "strategy": "BotPrimeX_TopstepX",
+  "bot_name": "topstepx-backtest",
   "max_open_trades": 4,
   "stake_currency": "USD",
   "stake_amount": "unlimited",

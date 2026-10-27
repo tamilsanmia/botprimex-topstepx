@@ -187,7 +187,7 @@ def test_without_a_filled_exit_the_recovery_is_freqtrades(db, monkeypatch, recov
 
 
 class AtrDcaStrategy(h.HarnessStrategy):
-    """Like NoTankAi_TopstepX with dca_stop "atr": no stored stop on the first entry, 8 ticks from each add."""
+    """A signal-DCA strategy with an ATR stop on adds: no stored stop on the first entry, 8 ticks from each add."""
 
     def order_filled(self, pair, trade, order, current_time, **kwargs):
         if order.ft_order_side == trade.entry_side and len(trade.select_filled_orders(trade.entry_side)) >= 2:

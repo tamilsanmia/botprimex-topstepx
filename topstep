@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# topstep - one command for the BotPrimeX TopstepX (ProjectX) bot.
+# topstep - one command for the Freqtrade TopstepX (ProjectX) bot.
 # Run `./topstep --help` for the list of commands.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -15,10 +15,9 @@ usage() {
 Usage: ./topstep <command> [options]
 
 Setup
-  setup                 Create .env and user_data/ (configs, strategies) if missing.
-                        Never overwrites: a strategy that differs from the repo copy is
-                        kept and reported. FORCE=1 ./topstep setup replaces it after
-                        saving a backup in user_data/strategies/.backup/
+  setup                 Create .env, user_data/ and the two configs if missing.
+                        Strategies are not part of this repo: put yours in
+                        user_data/strategies/ and set STRATEGY in .env
   build                 Build the Docker images (gateway + Freqtrade)
   accounts              List your TopstepX accounts and which one the bot uses
 
@@ -36,7 +35,8 @@ Backtesting
   download [options]    Download history (see: ./topstep download --help)
   backtest-ui [stop]    Start (or stop) the backtest web app (FreqUI)
   backtest [timerange] [strategy]
-                        Run a backtest in the terminal, e.g. 20260901- NoTankAi_TopstepX
+                        Run a backtest in the terminal, e.g. 20260901- MyStrategy_TopstepX
+                        (default strategy: STRATEGY from .env)
 
 Checks
   test                  Run the gateway and Python unit tests on the working tree
@@ -90,45 +90,14 @@ print_guard() {
   gateway_call GET /guard | "${LIVE[@]}" exec -T projectx-gateway node -e "$node_format"
 }
 
-STRATEGY_FILES=(BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py)
-# Copy each repo strategy into user_data/strategies only when it is missing. An
-# identical file is skipped; a different one is kept (it may hold your edits), unless
-# FORCE=1, which first saves it to user_data/strategies/.backup/<file>.<UTC stamp>.
-sync_strategies() {
-  local f dest stamp
-  stamp=$(date -u +%Y%m%dT%H%M%SZ)
-  for f in "${STRATEGY_FILES[@]}"; do
-    dest="user_data/strategies/$f"
-    # Strategy files are not in the repo: put them in user_data/strategies yourself.
-    [ -f "$f" ] || continue
-    if [ ! -f "$dest" ]; then
-      cp "$f" "$dest" && echo "copied $f to user_data/strategies/"
-    elif cmp -s "$f" "$dest"; then
-      echo "up to date: $f"
-    elif [ "${FORCE:-0}" = "1" ]; then
-      mkdir -p user_data/strategies/.backup
-      cp -p "$dest" "user_data/strategies/.backup/$f.$stamp"
-      cp "$f" "$dest"
-      echo "replaced $f (backup: user_data/strategies/.backup/$f.$stamp)"
-    else
-      echo "differs: $f (run FORCE=1 ./topstep setup to replace; a backup is written to user_data/strategies/.backup/$f.<UTC stamp>)"
-    fi
-  done
-}
-# Warn (never fail) when the running setup may not match this checkout: the image
-# bakes in projectx/ at build time, and user_data/strategies holds copies.
+# Warn (never fail) when the image does not match this checkout: it bakes in projectx/ at build time.
 check_drift() {
-  local host_hash image_hash f
+  local host_hash image_hash
   host_hash=$(find projectx -name '*.py' | LC_ALL=C sort | xargs cat | sha256sum | cut -d' ' -f1)
   image_hash=$(docker run --rm --entrypoint cat botprimex/freqtrade-projectx:latest /opt/projectx/BUILD_HASH 2>/dev/null || true)
   if [ -n "$image_hash" ] && [ "$image_hash" != "$host_hash" ]; then
     echo "warning: the Freqtrade image does not match projectx/ in this checkout. Run: ./topstep build" >&2
   fi
-  for f in "${STRATEGY_FILES[@]}"; do
-    if [ -f "$f" ] && [ -f "user_data/strategies/$f" ] && ! cmp -s "$f" "user_data/strategies/$f"; then
-      echo "warning: user_data/strategies/$f differs from the repo copy (FORCE=1 ./topstep setup replaces it, with a backup)" >&2
-    fi
-  done
 }
 rand_hex() {
   openssl rand -hex "$1" 2>/dev/null || head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'
@@ -158,7 +127,6 @@ cmd_setup() {
   mkdir -p user_data/strategies user_data/logs user_data/backtest-gateway
   [ -f user_data/config.json ] || create_config config_projectx.example.json user_data/config.json
   [ -f user_data/config-futures-backtest.json ] || create_config config_backtest.example.json user_data/config-futures-backtest.json
-  sync_strategies
   chown -R 1000:1000 user_data 2>/dev/null || true
   echo
   bold "Next:"
@@ -166,7 +134,8 @@ cmd_setup() {
   echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance. New configs get random"
   echo "     api_server secrets; the bot and the backtest web app refuse empty or change-me values"
   echo "     (read the UI login password from api_server.password in each config)"
-  echo "  3. ./topstep build && ./topstep accounts && ./topstep start"
+  echo "  3. Put your strategy in user_data/strategies/ and set STRATEGY in .env (e.g. MyStrategy_TopstepX)"
+  echo "  4. ./topstep build && ./topstep accounts && ./topstep start"
 }
 
 cmd_download() {
@@ -195,7 +164,8 @@ EOF
 cmd_backtest() {
   local range="${1:-}"
   local strategy="${2:-${STRATEGY:-$(grep -E '^STRATEGY=' .env | cut -d= -f2 || true)}}"
-  local args=(backtesting --config /freqtrade/user_data/config-futures-backtest.json --strategy "${strategy:-BotPrimeX_TopstepX}")
+  [ -n "$strategy" ] || die "no strategy: pass one (./topstep backtest 20260901- MyStrategy_TopstepX) or set STRATEGY in .env"
+  local args=(backtesting --config /freqtrade/user_data/config-futures-backtest.json --strategy "$strategy")
   [ -n "$range" ] && args+=(--timerange "$range")
   "${BT[@]}" run --rm freqtrade-webserver "${args[@]}"
 }

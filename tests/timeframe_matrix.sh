@@ -5,7 +5,8 @@
 #
 #   tests/timeframe_matrix.sh [workdir] [timeframes...]
 #
-#   MATRIX_STRATEGIES="BotPrimeX_TopstepX NoTankAi_TopstepX"   strategies to cover (default: both)
+#   MATRIX_STRATEGIES="MyStrategy_TopstepX"   strategies to cover (required; files from MATRIX_STRATEGY_DIR,
+#                                             default user_data/strategies)
 #   MATRIX_TAG=fixcheck   image tag to test (default: latest)
 #   MATRIX_PORT=18001     loopback port of the Freqtrade API
 #
@@ -16,7 +17,8 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${1:-/tmp/projectx-matrix}"
 shift || true
 if [ $# -gt 0 ]; then TFS=("$@"); else TFS=(1s 5s 15s 1m 5m); fi
-read -r -a STRATEGIES <<< "${MATRIX_STRATEGIES:-BotPrimeX_TopstepX NoTankAi_TopstepX}"
+: "${MATRIX_STRATEGIES:?set MATRIX_STRATEGIES, e.g. MATRIX_STRATEGIES=MyStrategy_TopstepX}"
+read -r -a STRATEGIES <<< "$MATRIX_STRATEGIES"
 export MATRIX_WORK="$WORK" MATRIX_PORT="${MATRIX_PORT:-18001}"
 COMPOSE=(docker compose -p pxmatrix -f "$REPO/tests/docker-compose.matrix.yml")
 API="http://127.0.0.1:$MATRIX_PORT/api/v1"

@@ -1,6 +1,6 @@
-# BotPrimeX for TopstepX
+# Freqtrade for TopstepX
 
-Run the BotPrimeX Freqtrade strategy on a TopstepX (ProjectX) futures account: MES, MNQ, ES, NQ, gold, crude, micro Bitcoin and more. The bot follows Topstep's rules on its own, so it stops before an account limit is broken.
+Run your own Freqtrade strategy on a TopstepX (ProjectX) futures account: MES, MNQ, ES, NQ, gold, crude, micro Bitcoin and more. The bot follows Topstep's rules on its own, so it stops before an account limit is broken. No strategy is included: bring yours (see Strategies).
 
 ```
 Freqtrade  --->  projectx-gateway  --->  TopstepX (api.topstepx.com, live data hubs)
@@ -8,7 +8,7 @@ Freqtrade  --->  projectx-gateway  --->  TopstepX (api.topstepx.com, live data h
 ```
 
 * **projectx-gateway** is the only part that talks to TopstepX. It streams live prices, builds candles, places orders and enforces the Topstep rules.
-* **Freqtrade** runs a TopstepX strategy (`BotPrimeX_TopstepX` or `NoTankAi_TopstepX`) and asks the gateway for everything.
+* **Freqtrade** runs your TopstepX strategy (any Freqtrade strategy wrapped with `TopstepXMixin`, see Strategies) and asks the gateway for everything.
 
 ---
 
@@ -80,8 +80,7 @@ PROJECTX_ACCOUNT_ID=27790619
 | `user_data/config.json` | Live / dry-run settings: pairs, Topstep rules, protection |
 | `user_data/config-futures-backtest.json` | Backtest settings |
 | `config_projectx.example.json`, `config_backtest.example.json` | Templates for the two configs |
-| `BotPrimeX.py`, `BotPrimeX_TopstepX.py` | BotPrimeX and its TopstepX version |
-| `NoTankAI.py`, `NoTankAI_TopstepX.py` | NoTankAi and its TopstepX version |
+| `user_data/strategies/` | Your strategies (not part of this repo, not tracked by git) |
 | `projectx/strategy_mixin.py` | The TopstepX layer shared by every `_TopstepX` strategy |
 | `docker-compose.yml` | Live / dry-run stack |
 | `docker-compose-webserver.yml` | Backtest stack (FreqUI) |
@@ -181,22 +180,9 @@ More are available, including FX, rates, agriculture, natural gas and silver. Th
 
 ## Strategies
 
-| Strategy | Signals | Use on TopstepX |
-| --- | --- | --- |
-| `BotPrimeX_TopstepX` | BotPrimeX (multi-timeframe extrema, RSI, DI, 24h change) | yes |
-| `NoTankAi_TopstepX` | NoTankAi (5m extrema, RSI, DI) from `NoTankAI.py` in this folder | yes |
-| `BotPrimeX`, `NoTankAi` | the original crypto versions | no: no Topstep rules, -99% stop |
+No strategy ships with this repo. Put your strategy files in `user_data/strategies/` (git ignores that folder), and set the class name in `.env`, for example `STRATEGY=MyStrategy_TopstepX`. Then run `./topstep start`. In the backtest web app, pick it from the strategy list.
 
-Choose the live bot's strategy in `.env` with `STRATEGY=NoTankAi_TopstepX`, then run `./topstep restart`. In the backtest web app, pick it from the strategy list.
-
-The `_TopstepX` versions keep the signals, ROI and partial exits of the strategy file in this folder. For NoTankAi that is the rewritten `NoTankAI.py`, not an older `user_data/NoTankAI.original.py` you may have. They add the TopstepX layer:
-* the Topstep rules and account protection
-* risk-based whole contracts and a real protective stop
-* the mini/micro limits and the roll guard
-
-Any strategy's crypto leverage is replaced by `topstep_strategy.leverage`. Profit-based settings (ROI, partial exits at +25%, DCA at -15%) are measured on stake, so they change with that leverage.
-
-**Make any other Freqtrade strategy TopstepX-ready.** Create `MyStrategy_TopstepX.py` next to it:
+**Make any Freqtrade strategy TopstepX-ready.** Create `MyStrategy_TopstepX.py` next to `MyStrategy.py` in `user_data/strategies/`:
 
 ```python
 import os, sys
@@ -208,7 +194,14 @@ class MyStrategy_TopstepX(TopstepXMixin, MyStrategy):
     pass
 ```
 
-Note: both BotPrimeX and NoTankAi find tops and bottoms with `argrelextrema`, which needs candles after the turning point to confirm it. Backtests therefore look better than live trading will be. Confirm results in dry-run before going live.
+The `_TopstepX` version keeps your strategy's signals, ROI and partial exits, and adds:
+* the Topstep rules and account protection
+* risk-based whole contracts and a real protective stop
+* the mini/micro limits and the roll guard
+
+Your strategy's crypto leverage is replaced by `topstep_strategy.leverage`. Profit-based settings (ROI, partial exits, DCA thresholds) are measured on stake, so they change with that leverage.
+
+Check your indicators for look-ahead before trusting a backtest: anything computed over the whole dataframe (for example `scipy.signal.argrelextrema` for tops and bottoms) uses candles after the signal in a backtest but not live. Confirm results in dry-run before going live.
 
 ## How trades are sized
 
@@ -229,7 +222,7 @@ A separate web app (FreqUI) for backtests, with its own gateway, so it never tou
 ./topstep backtest-ui    # open http://127.0.0.1:8095
 ```
 
-Log in with `api_server.username` / `password` from `user_data/config-futures-backtest.json`. Then pick `BotPrimeX_TopstepX` or `NoTankAi_TopstepX`, a timeframe and dates, and run.
+Log in with `api_server.username` / `password` from `user_data/config-futures-backtest.json`. Then pick your `_TopstepX` strategy, a timeframe and dates, and run.
 
 Both web apps listen on localhost only. Reach them from your PC with an SSH tunnel, or put a TLS reverse proxy in front:
 
@@ -364,4 +357,4 @@ The gateway refuses to start (exit code 2) with an empty `GATEWAY_SECRET` unless
 
 * `PROJECTX_MOCK=1` in `.env` replaces TopstepX with a simulator (fake prices and fills). Never use it for real trading.
 * `./topstep test` runs the unit tests on the files in this folder.
-* `tests/timeframe_matrix.sh` runs a separate stack (`tests/docker-compose.matrix.yml`, project `pxmatrix`, API on `127.0.0.1:18001`) on the simulator for each of `BotPrimeX_TopstepX` and `NoTankAi_TopstepX` at several timeframes and prints a table. It uses its own containers and a scratch directory, never the live or backtest stack. `MATRIX_TAG=fixcheck` tests an image built with another tag.
+* `tests/timeframe_matrix.sh` runs a separate stack (`tests/docker-compose.matrix.yml`, project `pxmatrix`, API on `127.0.0.1:18001`) on the simulator for each strategy in `MATRIX_STRATEGIES` (files from `user_data/strategies/`) at several timeframes and prints a table. It uses its own containers and a scratch directory, never the live or backtest stack. `MATRIX_TAG=fixcheck` tests an image built with another tag.

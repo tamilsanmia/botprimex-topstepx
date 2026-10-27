@@ -309,6 +309,40 @@ test('engines are bounded by maxEngines and dropped after idleMs', async () => {
   }
 });
 
+test('concurrent replays share one paced loop: with sliceMs 0 each event-loop turn reads one page', async () => {
+  const ctx = setup({ now: SESSION + 2 * HOUR, sliceMs: 0, chunkRows: 50, waitMs: 10_000 });
+  try {
+    const roots = ['MES', 'MNQ', 'MGC', 'MYM'];
+    for (const root of roots) {
+      const ticks = [];
+      for (let i = 0; i < 1000; i += 1) ticks.push([SESSION + i * 1000, 100 + (i % 9), 1 + (i % 4), i % 2]);
+      record(ctx.store, root, ticks, { quotes: false });
+    }
+    // A self-rescheduling setImmediate counts event-loop turns.
+    let turn = 0;
+    let ticking = true;
+    const tick = () => {
+      turn += 1;
+      if (ticking) setImmediate(tick);
+    };
+    setImmediate(tick);
+    const perTurn = new Map();
+    const step = ctx.service.step.bind(ctx.service);
+    ctx.service.step = (job) => {
+      perTurn.set(turn, (perTurn.get(turn) || 0) + 1);
+      return step(job);
+    };
+    const answers = await Promise.all(roots.map((root) => ctx.service.features(root, '1m', SESSION)));
+    ticking = false;
+    assert.ok(answers.every((rows) => rows.length === 17));
+    const steps = [...perTurn.values()].reduce((a, b) => a + b, 0);
+    assert.ok(steps >= roots.length * 20, `${steps} pages`);
+    assert.equal(Math.max(...perTurn.values()), 1, 'one page per turn, whatever the number of replays');
+  } finally {
+    ctx.done();
+  }
+});
+
 test('a large replay never blocks the event loop for 50 ms', async (t) => {
   const ctx = setup({ now: SESSION + 6 * HOUR, waitMs: 50 });
   try {

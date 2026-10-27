@@ -271,10 +271,11 @@ const yieldTurn = () => new Promise((resolve) => setImmediate(resolve));
  *
  * An engine keeps a (ts, seq) cursor into the tick store and catches up by reading
  * the rows after it in pages, so seeding and live updates are one loop and the input
- * order is the reference's. The loop yields to the event loop every `sliceMs`, and
- * first fills run one at a time. A request waits at most `waitMs` for its engine and
- * otherwise gets a 503 while the replay goes on; a warm request reads the new prints
- * and copies the open candle.
+ * order is the reference's. The loop yields to the event loop every `sliceMs`. First
+ * fills of different engines interleave, so a quiet pair is ready in milliseconds
+ * while a busy one (MNQ: about 1.7M prints a session) is still replaying. A request
+ * waits at most `waitMs` for its engine and otherwise gets a 503 while the replay
+ * goes on; a warm request reads the new prints and copies the open candle.
  *
  * Trade-off: a print that reaches SQLite after a later-keyed print of the same root
  * was already read (more than one flush out of order) is behind the cursor and not
@@ -301,7 +302,9 @@ export class OrderflowService {
     this.chunkRows = chunkRows;
     // Map order is least recently used first.
     this.entries = new Map();
-    this.seeds = Promise.resolve();
+    // Replays waiting for their next page, served in turn by pump().
+    this.jobs = [];
+    this.pumping = false;
   }
 
   async features(root, tf, since, until) {
@@ -371,54 +374,75 @@ export class OrderflowService {
   /** Starts or joins the entry's single catch-up. Resolves to the error it failed with, or null. */
   catchUp(entry) {
     if (!entry.running) {
-      const run = entry.seeded ? this.replay(entry) : this.queueSeed(() => this.replay(entry));
-      entry.running = run.then(() => null, (err) => err).finally(() => {
+      entry.running = this.replay(entry).then(() => null, (err) => err).finally(() => {
         entry.running = null;
       });
     }
     return entry.running;
   }
 
-  /** First fills run one after another, so the first pairs get their data soonest. */
-  queueSeed(job) {
-    const run = this.seeds.then(job);
-    this.seeds = run.then(() => {}, () => {});
-    return run;
+  /** Resolves once every print after the engine's cursor and before `until` is pushed. */
+  replay(entry, until = this.now()) {
+    return new Promise((resolve, reject) => {
+      const dayStart = Math.floor(entry.engine.cursorTs / DAY_MS) * DAY_MS;
+      this.jobs.push({ entry, until, dayStart, resolve, reject });
+      if (!this.pumping) this.pump();
+    });
   }
 
   /**
-   * Pushes every print after the engine's cursor and before `until`. Reads are
-   * bounded to one UTC day at a time, so a gzipped day is opened by the streaming
-   * prepareDays() before it is read, never by gunzipSync.
+   * One loop runs every replay, a page at a time in turn, and yields to the event
+   * loop when `sliceMs` is used up. Separate loops would each take a slice in the
+   * same event-loop turn, so N replays would hold the loop N times as long.
    */
-  async replay(entry, until = this.now()) {
-    const { engine, root } = entry;
-    const store = this.tickStore;
-    let dayStart = Math.floor(engine.cursorTs / DAY_MS) * DAY_MS;
+  async pump() {
+    this.pumping = true;
     let sliceStart = performance.now();
-    for (;;) {
-      const dayEnd = dayStart + DAY_MS;
-      await store.prepareDays(dayStart, dayStart);
-      const before = engine.cursorTs < dayStart;
-      const rows = store.ticksAfter(root, before ? dayStart : engine.cursorTs, before ? -1 : engine.cursorSeq, Math.min(until, dayEnd), this.chunkRows);
-      for (const r of rows) engine.push(r[0], r[1], r[2], r[3]);
-      if (rows.length) {
-        const last = rows[rows.length - 1];
-        engine.cursorTs = last[0];
-        engine.cursorSeq = last[4];
-        entry.replayed += rows.length;
+    try {
+      while (this.jobs.length) {
+        const job = this.jobs.shift();
+        try {
+          // Opens a gzipped day with a streaming gunzip, so db() never runs gunzipSync for it.
+          await this.tickStore.prepareDays(job.dayStart, job.dayStart);
+          if (this.step(job)) job.resolve();
+          else this.jobs.push(job);
+        } catch (err) {
+          job.reject(err);
+        }
+        if (this.jobs.length && performance.now() - sliceStart >= this.sliceMs) {
+          await yieldTurn();
+          sliceStart = performance.now();
+        }
       }
-      if (rows.length < this.chunkRows) {
-        if (dayEnd >= until) break;
-        dayStart = dayEnd;
-      }
-      if (performance.now() - sliceStart >= this.sliceMs) {
-        await yieldTurn();
-        sliceStart = performance.now();
-      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  /** Reads and pushes one page, bounded to one UTC day. True when the job reached `until`. */
+  step(job) {
+    const { entry, until } = job;
+    const { engine } = entry;
+    const dayEnd = job.dayStart + DAY_MS;
+    const before = engine.cursorTs < job.dayStart;
+    const rows = this.tickStore.ticksAfter(
+      entry.root, before ? job.dayStart : engine.cursorTs, before ? -1 : engine.cursorSeq, Math.min(until, dayEnd), this.chunkRows,
+    );
+    for (const r of rows) engine.push(r[0], r[1], r[2], r[3]);
+    if (rows.length) {
+      const last = rows[rows.length - 1];
+      engine.cursorTs = last[0];
+      engine.cursorSeq = last[4];
+      entry.replayed += rows.length;
+    }
+    if (rows.length === this.chunkRows) return false;
+    if (dayEnd < until) {
+      job.dayStart = dayEnd;
+      return false;
     }
     entry.readUntil = Math.max(entry.readUntil, until);
     entry.seeded = true;
+    return true;
   }
 
   /** Drops entries idle for idleMs, then the least recently used over maxEngines; never one that is replaying. */

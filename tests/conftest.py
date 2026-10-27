@@ -28,11 +28,14 @@ class FakeGateway:
         # What /guard answers (None = gateway failure) and what /orderflow/features returns (None = failure).
         self.guard: dict | None = {"status": "active", "canEnter": True, "flatten": False, "reasons": [], "metrics": {}}
         self.features: list | None = []
+        # Seconds /orderflow/features waits before answering.
+        self.features_delay = 0.0
 
     def reset(self):
         self.requests.clear()
         self.guard = {"status": "active", "canEnter": True, "flatten": False, "reasons": [], "metrics": {}}
         self.features = []
+        self.features_delay = 0.0
 
     def app(self):
         app = web.Application()
@@ -60,6 +63,7 @@ class FakeGateway:
                     return web.json_response({"error": "guard down", "kind": "ExchangeNotAvailable"}, status=503)
                 return web.json_response(self.guard)
             if p == "/orderflow/features":
+                await asyncio.sleep(self.features_delay)
                 if self.features is None:
                     return web.json_response({"error": "no orderflow", "kind": "ExchangeNotAvailable"}, status=503)
                 return web.json_response(self.features)

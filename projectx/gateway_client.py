@@ -69,7 +69,10 @@ class GatewayClient:
                 self._session.headers["X-Gateway-Secret"] = self.secret
         return self._session
 
-    def request(self, method: str, path: str, query: dict | None = None, body: dict | None = None) -> Any:
+    def request(
+        self, method: str, path: str, query: dict | None = None, body: dict | None = None, timeout: float | None = None
+    ) -> Any:
+        """``timeout`` (seconds) overrides ``self.timeout`` for this call only."""
         params = {k: v for k, v in (query or {}).items() if v is not None}
         try:
             resp = self.session.request(
@@ -77,7 +80,7 @@ class GatewayClient:
                 f"{self.url}{path}",
                 params=params,
                 data=json.dumps(body) if body is not None else None,
-                timeout=self.timeout,
+                timeout=self.timeout if timeout is None else timeout,
             )
         except requests.Timeout as e:
             raise ccxt.RequestTimeout(f"projectx-gateway timeout on {path}: {e}") from e
@@ -90,8 +93,8 @@ class GatewayClient:
         raise_for_payload(resp.status_code, payload, method, path)
         return payload
 
-    def get(self, path: str, query: dict | None = None) -> Any:
-        return self.request("GET", path, query=query)
+    def get(self, path: str, query: dict | None = None, timeout: float | None = None) -> Any:
+        return self.request("GET", path, query=query, timeout=timeout)
 
     def post(self, path: str, body: dict | None = None) -> Any:
         return self.request("POST", path, body=body or {})

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
+import time
 
+import ccxt
 import pandas as pd
 import pytest
 
 import projectx  # noqa: F401
 from conftest import SECRET
+from projectx import orderflow
 from projectx.gateway_client import GatewayClient
 from projectx.orderflow import FFILL, ZERO, fetch_features, merge_features
 
@@ -98,6 +101,65 @@ def test_an_empty_frame_is_returned_as_is_without_calling_the_gateway(gateway, c
     out = merge_features(empty, PAIR, "5m", client=client)
     assert out is empty and out.empty
     assert gateway.requests == []
+
+
+def assert_fallback(out):
+    for col in FFILL:
+        assert out[f"of_{col}"].isna().all(), col
+    for col in ZERO:
+        assert (out[f"of_{col}"] == 0.0).all(), col
+
+
+def features_calls(gateway) -> int:
+    return sum(1 for _, path, _, _ in gateway.requests if path == "/orderflow/features")
+
+
+def test_a_slow_gateway_costs_one_short_timeout_then_backs_off(gateway, client, monkeypatch):
+    monkeypatch.setattr(orderflow, "FEATURES_TIMEOUT", 0.3)
+    gateway.features = [row(0, delta=5.0, cvd_session=5.0)]
+    gateway.features_delay = 1.0
+    assert client.timeout == 15
+
+    started = time.monotonic()
+    out = merge_features(candles(), PAIR, "5m", client=client)
+    assert time.monotonic() - started < 0.9, "the features call has its own short timeout"
+    assert_fallback(out)
+    assert features_calls(gateway) == 1
+
+    started = time.monotonic()
+    out = merge_features(candles(), PAIR, "5m", client=client)
+    assert time.monotonic() - started < 0.2
+    assert features_calls(gateway) == 1, "no request during the backoff"
+    assert_fallback(out)
+
+
+def test_features_are_fetched_again_after_the_backoff(gateway, client, monkeypatch):
+    monkeypatch.setattr(orderflow, "FEATURES_TIMEOUT", 0.2)
+    monkeypatch.setattr(orderflow, "FEATURES_BACKOFF_SECS", 0.05)
+    gateway.features = [row(0, delta=5.0, cvd_session=5.0)]
+    gateway.features_delay = 0.6
+    assert_fallback(merge_features(candles(), PAIR, "5m", client=client))
+    time.sleep(0.1)
+    gateway.features_delay = 0.0
+    out = merge_features(candles(), PAIR, "5m", client=client)
+    assert out["of_delta"].tolist() == [5.0, 0.0, 0.0, 0.0]
+    assert features_calls(gateway) == 2
+
+
+def test_a_503_does_not_back_off(gateway, client):
+    gateway.features = None
+    assert_fallback(merge_features(candles(), PAIR, "5m", client=client))
+    assert getattr(client, "_of_skip_until", 0.0) == 0.0
+    gateway.features = [row(0, delta=1.0)]
+    assert merge_features(candles(), PAIR, "5m", client=client)["of_delta"].iloc[0] == 1.0
+    assert features_calls(gateway) == 2, "the next call requests again"
+
+
+def test_a_per_call_timeout_leaves_the_client_timeout_alone(gateway, client):
+    gateway.features_delay = 1.0
+    with pytest.raises(ccxt.RequestTimeout):
+        client.get("/orderflow/features", {"symbol": PAIR, "timeframe": "5m"}, timeout=0.2)
+    assert client.timeout == 15
 
 
 def test_fetch_features_converts_timestamps(gateway, client):

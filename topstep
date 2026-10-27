@@ -17,7 +17,7 @@ Usage: ./topstep <command> [options]
 Setup
   setup                 Create .env, user_data/ and the two configs if missing.
                         Strategies are not part of this repo: put yours in
-                        user_data/strategies/ and set STRATEGY in .env
+                        strategies/ and set STRATEGY in .env
   build                 Build the Docker images (gateway + Freqtrade)
   accounts              List your TopstepX accounts and which one the bot uses
 
@@ -124,7 +124,8 @@ cmd_setup() {
   else
     echo ".env already exists"
   fi
-  mkdir -p user_data/strategies user_data/logs user_data/backtest-gateway
+  # user_data/strategies stays as the mount point for ./strategies (see docker-compose.yml).
+  mkdir -p strategies user_data/strategies user_data/logs user_data/backtest-gateway
   [ -f user_data/config.json ] || create_config config_projectx.example.json user_data/config.json
   [ -f user_data/config-futures-backtest.json ] || create_config config_backtest.example.json user_data/config-futures-backtest.json
   chown -R 1000:1000 user_data 2>/dev/null || true
@@ -134,7 +135,7 @@ cmd_setup() {
   echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance. New configs get random"
   echo "     api_server secrets; the bot and the backtest web app refuse empty or change-me values"
   echo "     (read the UI login password from api_server.password in each config)"
-  echo "  3. Put your strategy in user_data/strategies/ and set STRATEGY in .env (e.g. MyStrategy_TopstepX)"
+  echo "  3. Put your strategy in strategies/ and set STRATEGY in .env (e.g. MyStrategy_TopstepX)"
   echo "  4. ./topstep build && ./topstep accounts && ./topstep start"
 }
 

@@ -57,6 +57,9 @@ services:
       GATEWAY_SECRET: ${GATEWAY_SECRET:?set GATEWAY_SECRET in .env}
     volumes:
       - "./user_data:/freqtrade/user_data"
+      # Strategies live outside user_data, in ./strategies, mounted read-only where
+      # Freqtrade looks for them. The bot cannot change its own code.
+      - "./strategies:/freqtrade/user_data/strategies:ro"
     networks:
       - backend
       - egress
@@ -88,7 +91,7 @@ services:
       --logfile /freqtrade/user_data/logs/freqtrade.log
       --db-url ${FREQTRADE_DB_URL:-sqlite:////freqtrade/user_data/tradesv3.sqlite}
       --config /freqtrade/user_data/config.json
-      --strategy ${STRATEGY:?set STRATEGY in .env (a *_TopstepX class in user_data/strategies)}
+      --strategy ${STRATEGY:?set STRATEGY in .env (a *_TopstepX class in strategies/)}
 
 networks:
   backend:

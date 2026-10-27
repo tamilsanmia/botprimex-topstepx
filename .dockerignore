@@ -1,5 +1,6 @@
 .git
 user_data
+strategies
 projectx-gateway/node_modules
 **/__pycache__
 *.log

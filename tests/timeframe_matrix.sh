@@ -6,7 +6,7 @@
 #   tests/timeframe_matrix.sh [workdir] [timeframes...]
 #
 #   MATRIX_STRATEGIES="MyStrategy_TopstepX"   strategies to cover (required; files from MATRIX_STRATEGY_DIR,
-#                                             default user_data/strategies)
+#                                             default strategies/)
 #   MATRIX_TAG=fixcheck   image tag to test (default: latest)
 #   MATRIX_PORT=18001     loopback port of the Freqtrade API
 #
@@ -24,7 +24,7 @@ COMPOSE=(docker compose -p pxmatrix -f "$REPO/tests/docker-compose.matrix.yml")
 API="http://127.0.0.1:$MATRIX_PORT/api/v1"
 trap '"${COMPOSE[@]}" down >/dev/null 2>&1 || true' EXIT
 mkdir -p "$WORK/user_data/strategies" "$WORK/user_data/logs"
-cp "${MATRIX_STRATEGY_DIR:-$REPO/user_data/strategies}"/*.py "$WORK/user_data/strategies/"  # strategies are not in the repo
+cp "${MATRIX_STRATEGY_DIR:-$REPO/strategies}"/*.py "$WORK/user_data/strategies/"  # strategies are not in the repo
 ROWS=()
 FAILED=0
 for STRATEGY in "${STRATEGIES[@]}"; do

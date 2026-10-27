@@ -22,7 +22,7 @@ Freqtrade  --->  projectx-gateway  --->  TopstepX (api.topstepx.com, live data h
 ## Quick start
 
 ```bash
-./topstep setup        # creates .env and user_data/ (configs + strategies)
+./topstep setup        # creates .env, strategies/ and user_data/ (configs)
 nano .env              # PROJECTX_USERNAME, PROJECTX_API_KEY, PROJECTX_ACCOUNT_ID
 ./topstep build        # builds the Docker images
 ./topstep accounts     # lists your accounts: copy the id into .env
@@ -80,7 +80,7 @@ PROJECTX_ACCOUNT_ID=27790619
 | `user_data/config.json` | Live / dry-run settings: pairs, Topstep rules, protection |
 | `user_data/config-futures-backtest.json` | Backtest settings |
 | `config_projectx.example.json`, `config_backtest.example.json` | Templates for the two configs |
-| `user_data/strategies/` | Your strategies (not part of this repo, not tracked by git) |
+| `strategies/` | Your strategies (not part of this repo, not tracked by git). Mounted read-only at `/freqtrade/user_data/strategies` in the Freqtrade containers |
 | `projectx/strategy_mixin.py` | The TopstepX layer shared by every `_TopstepX` strategy |
 | `docker-compose.yml` | Live / dry-run stack |
 | `docker-compose-webserver.yml` | Backtest stack (FreqUI) |
@@ -180,9 +180,9 @@ More are available, including FX, rates, agriculture, natural gas and silver. Th
 
 ## Strategies
 
-No strategy ships with this repo. Put your strategy files in `user_data/strategies/` (git ignores that folder), and set the class name in `.env`, for example `STRATEGY=MyStrategy_TopstepX`. Then run `./topstep start`. In the backtest web app, pick it from the strategy list.
+No strategy ships with this repo. Put your strategy files in `strategies/` at the top of the repo (git ignores its contents), and set the class name in `.env`, for example `STRATEGY=MyStrategy_TopstepX`. Then run `./topstep start`. In the backtest web app, pick it from the strategy list. The folder is kept outside `user_data/` and mounted read-only into the bot and the backtest web app, so the containers cannot change your strategy code. Files must be readable by uid 1000 (for example mode 644). Restart the bot after editing a strategy.
 
-**Make any Freqtrade strategy TopstepX-ready.** Create `MyStrategy_TopstepX.py` next to `MyStrategy.py` in `user_data/strategies/`:
+**Make any Freqtrade strategy TopstepX-ready.** Create `MyStrategy_TopstepX.py` next to `MyStrategy.py` in `strategies/`:
 
 ```python
 import os, sys
@@ -326,7 +326,7 @@ To serve a web app under a domain, point a DNS `A` record at the server and put 
 **Backups.** `user_data/` holds your configs (with the API secrets), the trade database, the guard state (`topstep_state.*.json`, which keeps the Max Loss Limit high-water mark) and the downloaded data. Back it up with a file only you can read:
 
 ```bash
-(umask 077; tar czf ~/botprimex-backup-$(date -u +%Y%m%d).tar.gz user_data .env)
+(umask 077; tar czf ~/botprimex-backup-$(date -u +%Y%m%d).tar.gz user_data strategies .env)
 ```
 
 The trade database is the file named by `FREQTRADE_DB_URL` in `.env` (default `user_data/tradesv3.sqlite`).
@@ -357,4 +357,4 @@ The gateway refuses to start (exit code 2) with an empty `GATEWAY_SECRET` unless
 
 * `PROJECTX_MOCK=1` in `.env` replaces TopstepX with a simulator (fake prices and fills). Never use it for real trading.
 * `./topstep test` runs the unit tests on the files in this folder.
-* `tests/timeframe_matrix.sh` runs a separate stack (`tests/docker-compose.matrix.yml`, project `pxmatrix`, API on `127.0.0.1:18001`) on the simulator for each strategy in `MATRIX_STRATEGIES` (files from `user_data/strategies/`) at several timeframes and prints a table. It uses its own containers and a scratch directory, never the live or backtest stack. `MATRIX_TAG=fixcheck` tests an image built with another tag.
+* `tests/timeframe_matrix.sh` runs a separate stack (`tests/docker-compose.matrix.yml`, project `pxmatrix`, API on `127.0.0.1:18001`) on the simulator for each strategy in `MATRIX_STRATEGIES` (files from `strategies/`) at several timeframes and prints a table. It uses its own containers and a scratch directory, never the live or backtest stack. `MATRIX_TAG=fixcheck` tests an image built with another tag.

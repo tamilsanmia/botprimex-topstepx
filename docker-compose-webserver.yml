@@ -71,6 +71,8 @@ services:
       GATEWAY_SECRET: ${GATEWAY_SECRET:?set GATEWAY_SECRET in .env}
     volumes:
       - "./user_data:/freqtrade/user_data"
+      # Strategies live outside user_data, in ./strategies (read-only).
+      - "./strategies:/freqtrade/user_data/strategies:ro"
     networks:
       - backend
       - egress

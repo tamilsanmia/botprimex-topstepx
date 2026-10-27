@@ -1,3 +1,4 @@
+import { GatewayError } from './errors.js';
 import { bucketStart, timeframe } from './timeframes.js';
 
 const EMA_ALPHA = 0.005;
@@ -257,70 +258,183 @@ export class FeatureEngine {
   }
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const LOADING = Symbol('loading');
+const yieldTurn = () => new Promise((resolve) => setImmediate(resolve));
+
 /**
- * Order flow features per (root, timeframe, from). Freqtrade asks for the same
- * window on every bot loop and for every pair, and each answer replays a session of
- * ticks, which blocks the event loop for as long as the session is big. Answers are
- * therefore kept for `ttlMs`, keyed by the candle the request falls in: within one
- * candle and the TTL a repeated request costs a map lookup, and a new candle or an
- * expired entry recomputes. A cached answer can lag the live candle by up to ttlMs.
+ * Order flow features served from one FeatureEngine per (root, timeframe, session
+ * the request starts in). The reference replays ticks from sessionStart(from), and
+ * its block-size average and warm-up depend on that start, so requests that start in
+ * different sessions get different engines; every answer equals computeFeatures
+ * over ticks(root, sessionStart(from), now).
  *
- * The computation is synchronous, so two requests can never be in flight at once;
- * there is nothing to coalesce beyond the cache itself.
+ * An engine keeps a (ts, seq) cursor into the tick store and catches up by reading
+ * the rows after it in pages, so seeding and live updates are one loop and the input
+ * order is the reference's. The loop yields to the event loop every `sliceMs`, and
+ * first fills run one at a time. A request waits at most `waitMs` for its engine and
+ * otherwise gets a 503 while the replay goes on; a warm request reads the new prints
+ * and copies the open candle.
+ *
+ * Trade-off: a print that reaches SQLite after a later-keyed print of the same root
+ * was already read (more than one flush out of order) is behind the cursor and not
+ * counted, where the old full replay would have counted it on the next request.
+ * Prints of one root arrive almost in order, so this is rare and small.
+ *
+ * While a request's session is not the current one, the engine for the next session
+ * is kept current too, so moving into it does not start a cold replay.
  */
 export class OrderflowService {
-  constructor({ tickStore, clock, blockMultiple = 25, valueAreaPct = 70, ttlMs = 5000, maxEntries = 64, now = () => Date.now() }) {
+  constructor({
+    tickStore, clock, blockMultiple = 25, valueAreaPct = 70, now = () => Date.now(),
+    waitMs = 2000, maxEngines = 64, idleMs = 30 * 60_000, sliceMs = 5, chunkRows = 250,
+  }) {
     this.tickStore = tickStore;
     this.clock = clock;
     this.blockMultiple = blockMultiple;
     this.valueAreaPct = valueAreaPct;
-    this.ttlMs = ttlMs;
-    this.maxEntries = maxEntries;
     this.now = now;
-    this.cache = new Map();
-    this.stats = { hits: 0, misses: 0 };
+    this.waitMs = waitMs;
+    this.maxEngines = maxEngines;
+    this.idleMs = idleMs;
+    this.sliceMs = sliceMs;
+    this.chunkRows = chunkRows;
+    // Map order is least recently used first.
+    this.entries = new Map();
+    this.seeds = Promise.resolve();
   }
 
-  features(root, tf, since, until) {
-    // A caller that names `until` asks about a fixed moment, which a cache keyed on "now" must not answer.
+  async features(root, tf, since, until) {
+    // A caller that names `until` asks about a fixed moment: a one-off replay.
     if (until !== undefined) return this.compute(root, tf, since, until);
 
     const now = this.now();
     const tfMs = timeframe(tf).ms;
-    // `since` is part of the key as given: rows before it are cut off, so a mid-candle value must not share an answer.
-    const key = `${root}|${tf}|${since ?? 'default'}|${bucketStart(now, tfMs)}`;
-    const hit = this.cache.get(key);
-    if (hit && now - hit.at < this.ttlMs) {
-      this.stats.hits += 1;
-      return hit.rows;
-    }
-    this.stats.misses += 1;
-    const rows = this.compute(root, tf, since, now);
-    this.cache.delete(key);
-    this.cache.set(key, { at: now, rows });
+    const from = since ?? now - 500 * tfMs;
+    const seedStart = this.clock.sessionStart(from);
+    const entry = this.entryFor(root, tf, tfMs, seedStart, now);
+    const next = this.clock.tradingDay(seedStart).end;
+    if (next <= this.clock.sessionStart(now)) this.catchUp(this.entryFor(root, tf, tfMs, next, now));
+    const ready = this.ready(entry, now);
     this.evict(now);
-    return rows;
+    await ready;
+    return entry.engine.view(from);
   }
 
-  evict(now) {
-    for (const [key, entry] of this.cache) {
-      if (this.cache.size <= this.maxEntries && now - entry.at < this.ttlMs) break;
-      this.cache.delete(key);
-    }
-  }
-
-  compute(root, tf, since, until = Date.now()) {
-    const tfMs = timeframe(tf).ms;
-    const from = since ?? until - 500 * tfMs;
-    const ticks = this.tickStore.ticks(root, this.clock.sessionStart(from), until);
-    return computeFeatures({
-      ticks,
+  newEntry(root, tf, tfMs, seedStart) {
+    const engine = new FeatureEngine({
       tfMs,
-      since: from,
       clock: this.clock,
       blockMultiple: this.blockMultiple,
       valueAreaPct: this.valueAreaPct,
       quoteAt: (ts) => this.tickStore.quoteAt(root, ts),
+      coverStart: seedStart,
     });
+    return { root, tf, engine, running: null, seeded: false, readUntil: -Infinity, replayed: 0, lastUsed: 0 };
+  }
+
+  entryFor(root, tf, tfMs, seedStart, now) {
+    const key = `${root}|${tf}|${seedStart}`;
+    let entry = this.entries.get(key);
+    if (entry) this.entries.delete(key);
+    else entry = this.newEntry(root, tf, tfMs, seedStart);
+    entry.lastUsed = now;
+    this.entries.set(key, entry);
+    return entry;
+  }
+
+  /** Resolves once the engine has read every print before `now`; a 503 after waitMs. */
+  async ready(entry, now) {
+    const work = (async () => {
+      while (entry.readUntil < now) {
+        const err = await this.catchUp(entry);
+        if (err) throw err;
+      }
+    })();
+    work.catch(() => {});
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(resolve, this.waitMs, LOADING);
+    });
+    try {
+      if ((await Promise.race([work, timeout])) === LOADING) {
+        throw new GatewayError(
+          `Order flow for ${entry.root} ${entry.tf} is still loading (${entry.replayed} prints replayed); retry shortly`,
+          { status: 503, kind: 'ExchangeNotAvailable' },
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Starts or joins the entry's single catch-up. Resolves to the error it failed with, or null. */
+  catchUp(entry) {
+    if (!entry.running) {
+      const run = entry.seeded ? this.replay(entry) : this.queueSeed(() => this.replay(entry));
+      entry.running = run.then(() => null, (err) => err).finally(() => {
+        entry.running = null;
+      });
+    }
+    return entry.running;
+  }
+
+  /** First fills run one after another, so the first pairs get their data soonest. */
+  queueSeed(job) {
+    const run = this.seeds.then(job);
+    this.seeds = run.then(() => {}, () => {});
+    return run;
+  }
+
+  /**
+   * Pushes every print after the engine's cursor and before `until`. Reads are
+   * bounded to one UTC day at a time, so a gzipped day is opened by the streaming
+   * prepareDays() before it is read, never by gunzipSync.
+   */
+  async replay(entry, until = this.now()) {
+    const { engine, root } = entry;
+    const store = this.tickStore;
+    let dayStart = Math.floor(engine.cursorTs / DAY_MS) * DAY_MS;
+    let sliceStart = performance.now();
+    for (;;) {
+      const dayEnd = dayStart + DAY_MS;
+      await store.prepareDays(dayStart, dayStart);
+      const before = engine.cursorTs < dayStart;
+      const rows = store.ticksAfter(root, before ? dayStart : engine.cursorTs, before ? -1 : engine.cursorSeq, Math.min(until, dayEnd), this.chunkRows);
+      for (const r of rows) engine.push(r[0], r[1], r[2], r[3]);
+      if (rows.length) {
+        const last = rows[rows.length - 1];
+        engine.cursorTs = last[0];
+        engine.cursorSeq = last[4];
+        entry.replayed += rows.length;
+      }
+      if (rows.length < this.chunkRows) {
+        if (dayEnd >= until) break;
+        dayStart = dayEnd;
+      }
+      if (performance.now() - sliceStart >= this.sliceMs) {
+        await yieldTurn();
+        sliceStart = performance.now();
+      }
+    }
+    entry.readUntil = Math.max(entry.readUntil, until);
+    entry.seeded = true;
+  }
+
+  /** Drops entries idle for idleMs, then the least recently used over maxEngines; never one that is replaying. */
+  evict(now) {
+    for (const [key, entry] of this.entries) {
+      if (entry.running) continue;
+      if (now - entry.lastUsed > this.idleMs || this.entries.size > this.maxEngines) this.entries.delete(key);
+    }
+  }
+
+  /** One-off answer as of `until`, from a fresh engine that is not kept. */
+  async compute(root, tf, since, until = this.now()) {
+    const tfMs = timeframe(tf).ms;
+    const from = since ?? until - 500 * tfMs;
+    const entry = this.newEntry(root, tf, tfMs, this.clock.sessionStart(from));
+    await this.replay(entry, until);
+    return entry.engine.view(from);
   }
 }

@@ -20,7 +20,10 @@ from projectx.ft_exchange import report_stop_as_open
 from projectx.strategy_mixin import STOP_KEY
 
 sys.path.insert(0, "/strategies")
-from NoTankAI_TopstepX import DCA_FILLED_KEY, SIGNAL_DCA_DEFAULTS, NoTankAi_TopstepX  # noqa: E402
+try:
+    from NoTankAI_TopstepX import DCA_FILLED_KEY, SIGNAL_DCA_DEFAULTS, NoTankAi_TopstepX  # noqa: E402
+except ImportError:  # strategies are not in the repo; tests/run_python_tests.sh mounts user_data/strategies
+    pytest.skip("NoTankAI_TopstepX strategy not available in /strategies", allow_module_level=True)
 
 SIGNAL_DCA = {"enabled": True, "first_contracts": 1, "max_adds": 2, "only_in_loss": True, "target_atr_mult": 1.0}
 

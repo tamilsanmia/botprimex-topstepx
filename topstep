@@ -90,7 +90,7 @@ print_guard() {
   gateway_call GET /guard | "${LIVE[@]}" exec -T projectx-gateway node -e "$node_format"
 }
 
-STRATEGY_FILES=(BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py EmaRsiCross.py EmaRsiCross_TopstepX.py)
+STRATEGY_FILES=(BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py)
 # Copy each repo strategy into user_data/strategies only when it is missing. An
 # identical file is skipped; a different one is kept (it may hold your edits), unless
 # FORCE=1, which first saves it to user_data/strategies/.backup/<file>.<UTC stamp>.
@@ -99,6 +99,8 @@ sync_strategies() {
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   for f in "${STRATEGY_FILES[@]}"; do
     dest="user_data/strategies/$f"
+    # Strategy files are not in the repo: put them in user_data/strategies yourself.
+    [ -f "$f" ] || continue
     if [ ! -f "$dest" ]; then
       cp "$f" "$dest" && echo "copied $f to user_data/strategies/"
     elif cmp -s "$f" "$dest"; then
@@ -123,7 +125,7 @@ check_drift() {
     echo "warning: the Freqtrade image does not match projectx/ in this checkout. Run: ./topstep build" >&2
   fi
   for f in "${STRATEGY_FILES[@]}"; do
-    if [ -f "user_data/strategies/$f" ] && ! cmp -s "$f" "user_data/strategies/$f"; then
+    if [ -f "$f" ] && [ -f "user_data/strategies/$f" ] && ! cmp -s "$f" "user_data/strategies/$f"; then
       echo "warning: user_data/strategies/$f differs from the repo copy (FORCE=1 ./topstep setup replaces it, with a backup)" >&2
     fi
   done

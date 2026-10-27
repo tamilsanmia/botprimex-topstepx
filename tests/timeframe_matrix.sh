@@ -22,7 +22,7 @@ COMPOSE=(docker compose -p pxmatrix -f "$REPO/tests/docker-compose.matrix.yml")
 API="http://127.0.0.1:$MATRIX_PORT/api/v1"
 trap '"${COMPOSE[@]}" down >/dev/null 2>&1 || true' EXIT
 mkdir -p "$WORK/user_data/strategies" "$WORK/user_data/logs"
-cp "$REPO/BotPrimeX.py" "$REPO/BotPrimeX_TopstepX.py" "$REPO/NoTankAI.py" "$REPO/NoTankAI_TopstepX.py" "$WORK/user_data/strategies/"
+cp "${MATRIX_STRATEGY_DIR:-$REPO/user_data/strategies}"/*.py "$WORK/user_data/strategies/"  # strategies are not in the repo
 ROWS=()
 FAILED=0
 for STRATEGY in "${STRATEGIES[@]}"; do

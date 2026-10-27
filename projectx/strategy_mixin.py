@@ -304,7 +304,17 @@ class TopstepXMixin:
     def _held_legs(self, exclude_pair: str | None = None) -> list[tuple[str, float]]:
         return [(t.pair, self._contracts(t)) for t in self._trades(is_open=True) if t.pair != exclude_pair]
 
+    def _topstep_off_in_dry_run(self) -> bool:
+        """topstep.dry_run_enabled false: dry-run (not backtests) trades without the Topstep rules."""
+        return (
+            bool(self.config.get("dry_run"))
+            and not self._backtesting
+            and (self.config.get("topstep") or {}).get("dry_run_enabled", True) is False
+        )
+
     def _overlap_conflict(self, pair: str) -> str | None:
+        if self._topstep_off_in_dry_run():
+            return None
         if not (self.config.get("topstep", {}).get("lots", {}) or {}).get("block_mini_micro_overlap", True):
             return None
         group = self._lot(pair).get("group")

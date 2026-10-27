@@ -82,7 +82,6 @@ PROJECTX_ACCOUNT_ID=27790619
 | `config_projectx.example.json`, `config_backtest.example.json` | Templates for the two configs |
 | `BotPrimeX.py`, `BotPrimeX_TopstepX.py` | BotPrimeX and its TopstepX version |
 | `NoTankAI.py`, `NoTankAI_TopstepX.py` | NoTankAi and its TopstepX version |
-| `EmaRsiCross.py`, `EmaRsiCross_TopstepX.py` | EMA 20/200 cross + RSI 30/70 and its TopstepX version |
 | `projectx/strategy_mixin.py` | The TopstepX layer shared by every `_TopstepX` strategy |
 | `docker-compose.yml` | Live / dry-run stack |
 | `docker-compose-webserver.yml` | Backtest stack (FreqUI) |
@@ -132,6 +131,7 @@ Check these against your Topstep dashboard, because Topstep changes them from ti
   * `raise_target`: Topstep's own rule. The profit target rises to `best day / 0.55`; nothing is blocked.
   * `off`: ignore it.
 * **Holidays**: `session.use_holiday_calendar` (default `true`) closes trading on CME holidays and closes positions before early closes. The calendar table is from third-party summaries and is not verified against CME; the 2027 rows are derived from U.S. holiday rules. Re-check it against CME's holiday page before each holiday.
+* **Dry-run without rules**: `topstep.dry_run_enabled` (default `true`). Set it to `false` and dry-run trades with every Topstep rule and protection off, as with `enabled: false`; live trading and backtests keep the rules.
 * **Account name**: `topstep.account_name` (for example `50KTC-DRY`) lets `phase` and `preset` `auto` work in backtests and dry-run. In live trading the real account name is used instead.
 * **Lots**: a micro counts as 1/10 of a mini. Holding a mini and its micro together (ES with MES, NQ with MNQ, CL with MCL) is blocked. A product the gateway does not know is refused: add it under `lots` in the config.
   * Verified: the 10:1 ratio in the Combine and Express Funded Account, the 5/10/15 mini limits, the equity index, gold and crude products. The ratio does not apply to the Live Funded Account.
@@ -185,7 +185,6 @@ More are available, including FX, rates, agriculture, natural gas and silver. Th
 | --- | --- | --- |
 | `BotPrimeX_TopstepX` | BotPrimeX (multi-timeframe extrema, RSI, DI, 24h change) | yes |
 | `NoTankAi_TopstepX` | NoTankAi (5m extrema, RSI, DI) from `NoTankAI.py` in this folder | yes |
-| `EmaRsiCross_TopstepX` | EMA 20/200 cross with an RSI 30/70 filter (`entry_mode` "cross"), or RSI 30/70 pullbacks in the EMA trend (`entry_mode` "pullback"), from `EmaRsiCross.py`. No look-ahead. | yes |
 | `BotPrimeX`, `NoTankAi` | the original crypto versions | no: no Topstep rules, -99% stop |
 
 Choose the live bot's strategy in `.env` with `STRATEGY=NoTankAi_TopstepX`, then run `./topstep restart`. In the backtest web app, pick it from the strategy list.

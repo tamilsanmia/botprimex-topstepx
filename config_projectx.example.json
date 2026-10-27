@@ -117,6 +117,8 @@
   "topstep": {
     // false disables every Topstep rule and protection (not recommended).
     "enabled": true,
+    // false: dry-run trades with every Topstep rule and protection off; live trading keeps them.
+    "dry_run_enabled": true,
     // "auto" reads phase and size from the account name: 50KTC -> evaluation 50K,
     // XFA -> funded (starts at $0), LFA -> live_funded. A Topstep Labs account (6KCHCR-LABS...)
     // starts at $0 but has no rule presets: set phase and the limits under "phases" yourself.

@@ -325,6 +325,10 @@ export class GatewayApp {
       console.warn('[gateway] topstep.enabled is false: account protection is OFF');
       return;
     }
+    if (cfg.dryRun && cfg.topstep.dry_run_enabled === false) {
+      console.warn('[gateway] dry-run with topstep.dry_run_enabled false: account protection is OFF (live keeps it)');
+      return;
+    }
     let resolved;
     try {
       // When the guard runs on Freqtrade's simulated account (dry-run), topstep.account_name says which account to

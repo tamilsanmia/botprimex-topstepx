@@ -205,6 +205,86 @@ test('maintain() twice is harmless and a .partial file left by a crash is never 
   store.close();
 });
 
+test('ticksAfter pages strictly after (ts, seq) across days and walks exactly what ticks() returns', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ticks-'));
+  const store = new TickStore({ dir });
+  const midnight = Date.UTC(2026, 9, 21);
+  const times = [];
+  for (let i = 0; i < 40; i += 1) times.push(midnight - 20_000 + i * 1000);
+  // Several prints in one millisecond, on both sides of midnight.
+  for (let i = 0; i < 4; i += 1) times.push(midnight - 1, midnight);
+  times.sort((a, b) => a - b);
+  for (const [i, ts] of times.entries()) store.record('MES', { ts, price: 6000 + i / 4, size: 1 + (i % 5), side: i % 2 ? 'sell' : 'buy' });
+  store.record('MNQ', { ts: midnight, price: 21000, size: 1, side: 'buy' });
+  store.flush();
+
+  const since = midnight - 30_000;
+  const until = midnight + 30_000;
+  const all = store.ticks('MES', since, until);
+  assert.equal(all.length, times.length);
+
+  const paged = [];
+  let cursor = [since, -1];
+  for (;;) {
+    const page = store.ticksAfter('MES', cursor[0], cursor[1], until, 3);
+    assert.ok(page.length <= 3, 'limit is respected');
+    paged.push(...page);
+    if (page.length < 3) break;
+    cursor = [page.at(-1)[0], page.at(-1)[4]];
+  }
+  assert.deepEqual(paged, all);
+
+  const [ts, , , , seq] = all[10];
+  assert.deepEqual(store.ticksAfter('MES', ts, seq, until, 1000), all.slice(11), 'strictly after the cursor');
+  assert.deepEqual(store.ticksAfter('MES', since, -1, midnight, 1000), all.filter((r) => r[0] < midnight), 'until is exclusive');
+
+  store.record('MES', { ts: midnight + 25_000, price: 1, size: 9, side: 'buy' });
+  const last = all.at(-1);
+  const fresh = store.ticksAfter('MES', last[0], last[4], until, 10);
+  assert.deepEqual(fresh.map((r) => [r[0], r[2]]), [[midnight + 25_000, 9]], 'a pending print is flushed first');
+  store.close();
+});
+
+test('quoteAt answers from a cached statement, also after the day was evicted from the LRU', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ticks-'));
+  const store = new TickStore({ dir });
+  const t0 = Date.UTC(2026, 9, 20, 14);
+  store.recordQuote('MES', t0 + 2, 5999.75, 6000.25);
+  for (let i = 1; i <= 6; i += 1) store.record('MES', { ts: t0 + i * DAY, price: 1, size: 1, side: 'buy' });
+  store.flush();
+  assert.deepEqual(store.quoteAt('MES', t0 + 500), { ts: t0, bid: 5999.75, ask: 6000.25 });
+  assert.equal(store.quoteAt('MNQ', t0 + 500), null, 'no table');
+  for (let i = 1; i <= 6; i += 1) store.ticks('MES', t0 + i * DAY, t0 + i * DAY + 1);
+  assert.ok(!store.open.has(day(t0)), 'the first day was closed by the LRU');
+  assert.deepEqual(store.quoteAt('MES', t0 + 500), { ts: t0, bid: 5999.75, ask: 6000.25 });
+  store.close();
+});
+
+test('prepareDays opens a gzipped day without gunzipSync and ticksAfter reads it back', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ticks-'));
+  const store = new TickStore({ dir, retentionDays: 30 });
+  const now = Date.UTC(2026, 9, 20, 12);
+  const old = now - 4 * DAY;
+  for (let i = 0; i < 3_000; i += 1) store.record('MES', { ts: old + i, price: 6000 + i / 100, size: 1, side: 'buy' });
+  store.record('MES', { ts: now, price: 7000, size: 1, side: 'sell' });
+  store.flush();
+  await store.maintain(now);
+  assert.ok(existsSync(path.join(dir, `${day(old)}.sqlite.gz`)));
+  assert.ok(!store.open.has(day(old)));
+
+  await Promise.all([store.prepareDays(old - DAY, old), store.prepareDays(old, old)]);
+  assert.ok(store.open.has(day(old)), 'the day is open');
+  const { temp } = store.open.get(day(old));
+  assert.ok(temp && existsSync(temp));
+  assert.match(temp, /-a\d+\.sqlite$/, 'opened by the streaming path, not by gunzipSync in db()');
+  // db() would only decompress synchronously when the day is not open.
+  const rows = store.ticksAfter('MES', old - 1, -1, old + DAY, 5000);
+  assert.equal(rows.length, 3_000);
+  assert.deepEqual(rows[0].slice(0, 4), [old, 6000, 1, 0]);
+  store.close();
+  assert.ok(!existsSync(temp), 'the temp file is removed on close');
+});
+
 test('maintain() keeps the live file when a late print reopened the day during the gzip', async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'ticks-'));
   const store = new TickStore({ dir });

@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { createGzip, gunzipSync } from 'node:zlib';
+import { createGunzip, createGzip, gunzipSync } from 'node:zlib';
 import os from 'node:os';
 
 import Database from 'better-sqlite3';
@@ -27,7 +27,8 @@ const tableName = (prefix, root) => `${prefix}_${String(root).replace(/[^A-Z0-9]
  * root), plus a 1 Hz bid/ask snapshot for spread at candle close.
  *
  * Days older than COMPRESS_AFTER_DAYS are gzipped; reading one decompresses it
- * into a temp file kept in a small LRU.
+ * into a temp file kept in a small LRU (synchronously in db(), or as a stream
+ * through prepareDays() for readers that can wait).
  */
 export class TickStore {
   constructor({ dir, retentionDays = 30, enabled = true }) {
@@ -40,6 +41,8 @@ export class TickStore {
     this.seqByRoot = new Map();
     this.flushing = null;
     this.maintaining = null;
+    this.preparing = new Map();
+    this.tempSeq = 0;
     this.closed = false;
     this.lastQuoteSec = new Map();
     this.stats = { written: 0, lastFlushMs: 0 };
@@ -74,13 +77,21 @@ export class TickStore {
         return null;
       }
     }
+    return this.register(day, file, temp);
+  }
 
+  /**
+   * Opens `file` as the connection for `day` and evicts the least recently used
+   * days over OPEN_CACHE. Prepared statements live in the entry, so they are
+   * closed with the connection.
+   */
+  register(day, file, temp) {
     const db = new Database(file, { readonly: Boolean(temp) });
     if (!temp) {
       db.pragma('journal_mode = WAL');
       db.pragma('synchronous = NORMAL');
     }
-    this.open.set(day, { db, temp, tables: new Set() });
+    this.open.set(day, { db, temp, tables: new Set(), stmts: new Map(), known: new Set() });
     while (this.open.size > OPEN_CACHE) {
       const [oldest, entry] = this.open.entries().next().value;
       if (oldest === utcDay(Date.now())) {
@@ -247,14 +258,93 @@ export class TickStore {
     return out;
   }
 
+  /** Open entry of `day` (opening it like db() does), or null when the day has no file. */
+  entry(day) {
+    return this.db(day) ? this.open.get(day) : null;
+  }
+
+  /** Prepared statement cached on the day's connection. */
+  statement(entry, sql, raw = false) {
+    let stmt = entry.stmts.get(sql);
+    if (!stmt) {
+      stmt = entry.db.prepare(sql);
+      if (raw) stmt.raw();
+      entry.stmts.set(sql, stmt);
+    }
+    return stmt;
+  }
+
+  /** Only a found table is remembered: today's table can be created after a miss. */
+  hasTable(entry, name) {
+    if (entry.known.has(name)) return true;
+    const found = this.statement(entry, "SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
+    if (found) entry.known.add(name);
+    return Boolean(found);
+  }
+
+  /**
+   * Up to `limit` ticks strictly after (afterTs, afterSeq) and before `until`, in
+   * (ts, seq) order, as [ts, price, size, side, seq]. Paging with the last row's
+   * (ts, seq) as the next cursor walks exactly the rows ticks() returns.
+   */
+  ticksAfter(root, afterTs, afterSeq, until, limit = 5000) {
+    this.flush();
+    const out = [];
+    const t = tableName('ticks', root);
+    for (const day of this.days(afterTs, until)) {
+      const entry = this.entry(day);
+      if (!entry || !this.hasTable(entry, t)) continue;
+      const rows = this.statement(entry, `SELECT ts, price, size, side, seq FROM ${t} WHERE (ts, seq) > (?, ?) AND ts < ? ORDER BY ts, seq LIMIT ?`, true)
+        .all(afterTs, afterSeq, until, limit - out.length);
+      for (const r of rows) out.push(r);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  /**
+   * Opens the gzipped days in [since, until] with a streaming gunzip, so a reader
+   * that awaits this first never decompresses a day synchronously in db().
+   * Days that are open, live or absent are left alone.
+   */
+  async prepareDays(since, until) {
+    for (const day of this.days(since, until)) {
+      if (this.open.has(day)) continue;
+      const file = this.filePath(day);
+      if (existsSync(file) || !existsSync(`${file}.gz`)) continue;
+      let job = this.preparing.get(day);
+      if (!job) {
+        job = this.gunzipDay(day, file).finally(() => this.preparing.delete(day));
+        this.preparing.set(day, job);
+      }
+      await job;
+    }
+  }
+
+  async gunzipDay(day, file) {
+    this.tempSeq += 1;
+    const temp = path.join(os.tmpdir(), `ticks-${process.pid}-${day}-a${this.tempSeq}.sqlite`);
+    try {
+      await pipeline(createReadStream(`${file}.gz`), createGunzip(), createWriteStream(temp));
+    } catch (err) {
+      rmSync(temp, { force: true });
+      throw err;
+    }
+    // A synchronous db() call may have opened the day meanwhile.
+    if (this.closed || this.open.has(day)) {
+      rmSync(temp, { force: true });
+      return;
+    }
+    this.register(day, temp, temp);
+  }
+
   /** Latest bid/ask at or before `ts` on the same UTC day. */
   quoteAt(root, ts) {
-    const db = this.db(utcDay(ts));
-    if (!db) return null;
+    const entry = this.entry(utcDay(ts));
+    if (!entry) return null;
     const q = tableName('quotes', root);
-    const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(q);
-    if (!exists) return null;
-    return db.prepare(`SELECT ts, bid, ask FROM ${q} WHERE ts <= ? ORDER BY ts DESC LIMIT 1`).get(ts) || null;
+    if (!this.hasTable(entry, q)) return null;
+    return this.statement(entry, `SELECT ts, bid, ask FROM ${q} WHERE ts <= ? ORDER BY ts DESC LIMIT 1`).get(ts) || null;
   }
 
   /** ccxt-shaped public trades for Freqtrade's orderflow (time pagination). */

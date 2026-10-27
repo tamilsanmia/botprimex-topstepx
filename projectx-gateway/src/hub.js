@@ -15,7 +15,7 @@ const REBUILD_STEPS_MS = [2000, 5000, 10000, 30000];
  * to the URL as well yields a duplicated access_token that the gateway rejects.
  */
 export class ManagedHub {
-  constructor({ name, url, tokenFactory, handlers, onReady, onState, factory }) {
+  constructor({ name, url, tokenFactory, handlers, onReady, onState, factory, rebuildStepsMs = REBUILD_STEPS_MS }) {
     this.name = name;
     this.url = url;
     this.tokenFactory = tokenFactory;
@@ -23,6 +23,7 @@ export class ManagedHub {
     this.onReady = onReady;
     this.onState = onState || (() => {});
     this.factory = factory || ((opts) => buildSignalR(opts));
+    this.rebuildStepsMs = rebuildStepsMs;
     this.connection = null;
     this.state = 'idle';
     this.rebuildAttempt = 0;
@@ -30,10 +31,13 @@ export class ManagedHub {
     this.stopping = false;
     this.lastMessageAt = 0;
     this.connectedAt = 0;
+    this.stateAt = 0;
+    this.everConnected = false;
   }
 
   setState(state, info) {
     this.state = state;
+    this.stateAt = Date.now();
     this.onState(state, info);
   }
 
@@ -79,12 +83,16 @@ export class ManagedHub {
       if (!this.stopping) this.scheduleRebuild();
     });
 
+    // A connect after an earlier one is a reconnect even though the connection object
+    // is new: whatever the hub sent while it was down is lost, and onReady has to repair it.
+    const reconnected = this.everConnected;
     try {
       await hub.start();
       this.connection = hub;
       this.connectedAt = Date.now();
+      this.everConnected = true;
       this.rebuildAttempt = 0;
-      await this.onReady(hub, { reconnected: false });
+      await this.onReady(hub, { reconnected });
       this.setState('connected');
       console.log(`[${this.name}] connected (${this.url})`);
     } catch (err) {
@@ -96,7 +104,7 @@ export class ManagedHub {
 
   scheduleRebuild() {
     if (this.rebuildTimer || this.stopping) return;
-    const delay = REBUILD_STEPS_MS[Math.min(this.rebuildAttempt, REBUILD_STEPS_MS.length - 1)];
+    const delay = this.rebuildStepsMs[Math.min(this.rebuildAttempt, this.rebuildStepsMs.length - 1)];
     this.rebuildAttempt += 1;
     this.rebuildTimer = setTimeout(() => {
       this.rebuildTimer = null;
@@ -123,7 +131,13 @@ export class ManagedHub {
   }
 
   status() {
-    return { state: this.state, lastMessageAt: this.lastMessageAt || null, connectedAt: this.connectedAt || null };
+    return {
+      state: this.state,
+      lastMessageAt: this.lastMessageAt || null,
+      ageMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null,
+      connectedAt: this.connectedAt || null,
+      stateSince: this.stateAt || null,
+    };
   }
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# topstep - one command for the BotPrimeX TopstepX (ProjectX) bot.
+# topstep - one command for the Freqtrade TopstepX (ProjectX) bot.
 # Run `./topstep --help` for the list of commands.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -15,7 +15,9 @@ usage() {
 Usage: ./topstep <command> [options]
 
 Setup
-  setup                 Create .env and user_data/ (configs, strategies) if missing
+  setup                 Create .env, user_data/ and the two configs if missing.
+                        Strategies are not part of this repo: put yours in
+                        strategies/ and set STRATEGY in .env
   build                 Build the Docker images (gateway + Freqtrade)
   accounts              List your TopstepX accounts and which one the bot uses
 
@@ -33,10 +35,11 @@ Backtesting
   download [options]    Download history (see: ./topstep download --help)
   backtest-ui [stop]    Start (or stop) the backtest web app (FreqUI)
   backtest [timerange] [strategy]
-                        Run a backtest in the terminal, e.g. 20260901- NoTankAi_TopstepX
+                        Run a backtest in the terminal, e.g. 20260901- MyStrategy_TopstepX
+                        (default strategy: STRATEGY from .env)
 
 Checks
-  test                  Run the gateway and Python unit tests
+  test                  Run the gateway and Python unit tests on the working tree
   config                Validate both compose files and all configs
 
   -h, --help            Show this help
@@ -87,27 +90,53 @@ print_guard() {
   gateway_call GET /guard | "${LIVE[@]}" exec -T projectx-gateway node -e "$node_format"
 }
 
+# Warn (never fail) when the image does not match this checkout: it bakes in projectx/ at build time.
+check_drift() {
+  local host_hash image_hash
+  host_hash=$(find projectx -name '*.py' | LC_ALL=C sort | xargs cat | sha256sum | cut -d' ' -f1)
+  image_hash=$(docker run --rm --entrypoint cat botprimex/freqtrade-projectx:latest /opt/projectx/BUILD_HASH 2>/dev/null || true)
+  if [ -n "$image_hash" ] && [ "$image_hash" != "$host_hash" ]; then
+    echo "warning: the Freqtrade image does not match projectx/ in this checkout. Run: ./topstep build" >&2
+  fi
+}
+rand_hex() {
+  openssl rand -hex "$1" 2>/dev/null || head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+# Copy an example config and replace its placeholder api_server secrets with random values.
+create_config() {
+  local src=$1 dest=$2
+  cp "$src" "$dest"
+  sed -i \
+    -e "s/\"jwt_secret_key\": \"change-me[^\"]*\"/\"jwt_secret_key\": \"$(rand_hex 32)\"/" \
+    -e "s/\"ws_token\": \"change-me[^\"]*\"/\"ws_token\": \"$(rand_hex 16)\"/" \
+    -e "s/\"password\": \"change-me[^\"]*\"/\"password\": \"$(rand_hex 16)\"/" \
+    "$dest"
+  chmod 600 "$dest"
+  echo "created $dest (api_server password, jwt_secret_key and ws_token set to random values)"
+}
 cmd_setup() {
   if [ ! -f .env ]; then
     cp .env.example .env
-    secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    secret=$(rand_hex 32)
     sed -i "s/^GATEWAY_SECRET=$/GATEWAY_SECRET=$secret/" .env
     chmod 600 .env
     echo "created .env (fill in PROJECTX_USERNAME and PROJECTX_API_KEY)"
   else
     echo ".env already exists"
   fi
-  mkdir -p user_data/strategies user_data/logs
-  [ -f user_data/config.json ] || { cp config_projectx.example.json user_data/config.json; echo "created user_data/config.json"; }
-  [ -f user_data/config-futures-backtest.json ] || { cp config_backtest.example.json user_data/config-futures-backtest.json; echo "created user_data/config-futures-backtest.json"; }
-  cp BotPrimeX.py BotPrimeX_TopstepX.py NoTankAI.py NoTankAI_TopstepX.py user_data/strategies/
-  echo "copied strategies to user_data/strategies/"
+  # user_data/strategies stays as the mount point for ./strategies (see docker-compose.yml).
+  mkdir -p strategies user_data/strategies user_data/logs user_data/backtest-gateway
+  [ -f user_data/config.json ] || create_config config_projectx.example.json user_data/config.json
+  [ -f user_data/config-futures-backtest.json ] || create_config config_backtest.example.json user_data/config-futures-backtest.json
   chown -R 1000:1000 user_data 2>/dev/null || true
   echo
   bold "Next:"
   echo "  1. Edit .env: PROJECTX_USERNAME, PROJECTX_API_KEY (and PROJECTX_ACCOUNT_ID)"
-  echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance, api_server password"
-  echo "  3. ./topstep build && ./topstep accounts && ./topstep start"
+  echo "  2. Edit user_data/config.json: topstep phase / preset / start_balance. New configs get random"
+  echo "     api_server secrets; the bot and the backtest web app refuse empty or change-me values"
+  echo "     (read the UI login password from api_server.password in each config)"
+  echo "  3. Put your strategy in strategies/ and set STRATEGY in .env (e.g. MyStrategy_TopstepX)"
+  echo "  4. ./topstep build && ./topstep accounts && ./topstep start"
 }
 
 cmd_download() {
@@ -136,20 +165,24 @@ EOF
 cmd_backtest() {
   local range="${1:-}"
   local strategy="${2:-${STRATEGY:-$(grep -E '^STRATEGY=' .env | cut -d= -f2 || true)}}"
-  local args=(backtesting --config /freqtrade/user_data/config-futures-backtest.json --strategy "${strategy:-BotPrimeX_TopstepX}")
+  [ -n "$strategy" ] || die "no strategy: pass one (./topstep backtest 20260901- MyStrategy_TopstepX) or set STRATEGY in .env"
+  local args=(backtesting --config /freqtrade/user_data/config-futures-backtest.json --strategy "$strategy")
   [ -n "$range" ] && args+=(--timerange "$range")
   "${BT[@]}" run --rm freqtrade-webserver "${args[@]}"
 }
 
 cmd_test() {
+  # Runs the checked-out sources, not the code baked into the images.
   bold "Gateway tests"
-  docker run --rm -v "$PWD/projectx-gateway/test:/app/test:ro" botprimex/projectx-gateway:latest node --test test/ 2>&1 \
+  docker run --rm \
+    -v "$PWD/projectx-gateway/src:/app/src:ro" \
+    -v "$PWD/projectx-gateway/test:/app/test:ro" \
+    -v "$PWD/tests/fixtures:/tests/fixtures:ro" \
+    "${PX_GATEWAY_IMAGE:-botprimex/projectx-gateway:latest}" node --test test/ 2>&1 \
     | grep -E "^# (tests|pass|fail)|^not ok"
   bold "Python tests"
-  docker run --rm -v "$PWD/tests:/tests:ro" --entrypoint bash botprimex/freqtrade-projectx:latest \
-    -c "pip install --user -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider /tests 2>&1 | tail -1"
+  bash tests/run_python_tests.sh 2>&1 | tail -1
 }
-
 cmd_config() {
   "${LIVE[@]}" config -q && echo "docker-compose.yml ok"
   "${BT[@]}" config -q && echo "docker-compose-webserver.yml ok"
@@ -171,7 +204,11 @@ case "$command" in
   setup) cmd_setup ;;
   build) require_env; "${LIVE[@]}" build ;;
   accounts) require_env; "${LIVE[@]}" run --rm --no-deps projectx-gateway node src/accounts.js 2>&1 | grep -vE "not found, using defaults|Network|Container" ;;
-  start) require_env; [ -f user_data/config.json ] || die "user_data/config.json is missing. Run: ./topstep setup"; "${LIVE[@]}" up -d ;;
+  start)
+    require_env
+    [ -f user_data/config.json ] || die "user_data/config.json is missing. Run: ./topstep setup"
+    check_drift
+    "${LIVE[@]}" up -d ;;
   stop) "${LIVE[@]}" down ;;
   restart) "${LIVE[@]}" restart ;;
   logs)
@@ -201,10 +238,12 @@ case "$command" in
       "${BT[@]}" up -d
       port="${WEBSERVER_PORT:-$(grep -E '^WEBSERVER_PORT=' .env | cut -d= -f2 || true)}"
       bind="${WEBSERVER_BIND:-$(grep -E '^WEBSERVER_BIND=' .env | cut -d= -f2 || true)}"
-      if [ "${bind:-0.0.0.0}" = "127.0.0.1" ]; then
+      if [ "${bind:-127.0.0.1}" = "127.0.0.1" ]; then
         echo "Backtest web app: http://127.0.0.1:${port:-8095} (private: ssh -L ${port:-8095}:127.0.0.1:${port:-8095} <user>@<server>)"
       else
-        echo "Backtest web app: http://$(hostname -I | awk '{print $1}'):${port:-8095}"
+        host="$bind"
+        [ "$bind" = "0.0.0.0" ] && host=$(hostname -I | awk '{print $1}')
+        echo "Backtest web app: http://${host}:${port:-8095} (reachable from the network: use TLS and strong api_server secrets)"
       fi
     fi ;;
   backtest) require_env; cmd_backtest "$@" ;;

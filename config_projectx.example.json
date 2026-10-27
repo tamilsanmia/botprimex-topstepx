@@ -78,6 +78,15 @@
     // "separate": Freqtrade's own stop order. "native": also attach a stopLossBracket
     // sized to max_risk_per_trade (account must be in Auto OCO Brackets mode).
     "brackets": "separate",
+    // Who makes sure an open position has a stop (watched every 2 s, needs topstep.protection.max_risk_per_trade):
+    //   "gateway": Freqtrade's own stop (stoploss_on_exchange) is the normal path. If a position still has no
+    //              working stop after grace_secs the gateway places one at max_risk_per_trade distance, and
+    //              flattens the position when it cannot, or when none is working after flatten_after_secs.
+    //              Entries the gateway could not protect (risk under one tick for the size, unknown tick
+    //              value, user hub down) are refused.
+    //   "native":  attach a stopLossBracket to every entry, nothing else (as brackets "native").
+    //   "off":     no gateway stop and no flatten.
+    "protective_stop": { "mode": "gateway", "grace_secs": 10, "flatten_after_secs": 30 },
     "reconcile_secs": 30,
     "flatten_grace_secs": 30,
     "backfill_candles": 1500,
@@ -85,9 +94,22 @@
     "max_order_size": 50,
     // "auto": dry-run -> guard runs on Freqtrade's simulated trades; live -> ProjectX account.
     "account_source": "auto",
-    // "auto": adds the account size to an Express Funded Account's $0 balance for sizing.
+    // "auto": adds the account size to the $0-start balance of an Express Funded or a Topstep
+    // Labs account (e.g. 6KCHCR-LABS... -> +6000) for sizing. A number sets the offset; 0 turns it off.
     "balance_offset": "auto",
-    "rate_limits": { "bars_per_30s": 40, "other_per_60s": 180 },
+    // order_reserve: of the "other" window, the last N requests are kept for orders, so reads
+    // and background syncs cannot starve a stop or an exit. max_queue bounds waiting
+    // non-order requests: the oldest background one is dropped first, then new reads fail.
+    "rate_limits": { "bars_per_30s": 40, "other_per_60s": 180, "order_reserve": 20, "max_queue": 500 },
+    // Stale data protection. A market quote (per whitelisted pair), a hub or the REST
+    // reconcile that has been silent for block_entries_secs blocks new entries; with a
+    // position open, flatten_secs flattens it through REST (0 = never flatten). Quote
+    // staleness is ignored on weekends and from flat_by until the session reset.
+    // notify sends a Telegram message when data goes stale and when it recovers.
+    "stale": { "block_entries_secs": 15, "flatten_secs": 120, "notify": true },
+    // How long the gateway keeps finished orders and fills in memory. The guard rebuilds
+    // missed end-of-day history from 90 days of fills at start-up, before anything is pruned.
+    "user_retention": { "orders_days": 2, "trades_days": 14 },
     "ticks": { "record": true, "retention_days": 30, "pairs": "whitelist" },
     "orderflow": { "block_multiple": 25, "value_area_pct": 70 }
   },
@@ -95,11 +117,18 @@
   "topstep": {
     // false disables every Topstep rule and protection (not recommended).
     "enabled": true,
+    // false: dry-run trades with every Topstep rule and protection off; live trading keeps them.
+    "dry_run_enabled": true,
     // "auto" reads phase and size from the account name: 50KTC -> evaluation 50K,
-    // XFA -> funded (starts at $0), LFA -> live_funded.
+    // XFA -> funded (starts at $0), LFA -> live_funded. A Topstep Labs account (6KCHCR-LABS...)
+    // starts at $0 but has no rule presets: set phase and the limits under "phases" yourself.
     "phase": "auto",
     "preset": "auto",
     "start_balance": "auto",
+    // Dry-run only: the account to simulate when phase/preset are "auto", for example "50KTC-DRY",
+    // "100KXFA-1" or "150KLFA-1" (size + TC, XFA or LFA). It wins over an auto-detected account and
+    // is ignored on a live account, which always supplies its own name. Backtests read it too.
+    // "account_name": "50KTC-DRY",
     "timezone": "America/New_York",
     "session": {
       "reset_time": "18:00", "eod_time": "16:10",
@@ -107,6 +136,10 @@
       "hold_mode": "intraday",
       "trading_windows": [],
       "trade_weekends": false,
+      // CME holidays and early closes for 2026-2027 (src/holidays.js, see docs/topstep-rules-sources.md):
+      // a closed day acts like a weekend, an early close stops entries 35 min and flattens 20 min before
+      // the halt (13:00 ET, Topstep closes positions 15 min before). false ignores the calendar.
+      "use_holiday_calendar": true,
       "news_blackout": [{ "days": "mon-fri", "start": "08:28", "end": "08:35", "label": "8:30 data" }]
     },
     "lots": { "micro_ratio": 10, "block_mini_micro_overlap": true, "overrides": {} },
@@ -115,7 +148,12 @@
       "evaluation": {
         "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
         "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": null,
-        "session": {}, "consistency_pct": 50, "max_mini_equivalent": null, "stop_on_target": true
+        // consistency_pct: Topstep's consistency target, 55 (0 = off).
+        // consistency_mode: "cap_day" (default, cautious) stops entries for the day at pct x profit_target
+        // ($1,650 on 50K) so the target never rises; "raise_target" is Topstep's own rule (no cap, the
+        // profit target rises to best day / pct); "off" ignores consistency.
+        "session": {}, "consistency_pct": 55, "consistency_mode": "cap_day",
+        "max_mini_equivalent": null, "stop_on_target": true
       },
       "funded": {
         "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
@@ -133,7 +171,7 @@
     }
   },
 
-  // BotPrimeX_TopstepX strategy settings.
+  // TopstepX layer settings for every *_TopstepX strategy (projectx/strategy_mixin.py).
   "topstep_strategy": {
     // Protective stop distance: ATR(period) x mult, clamped to [min, max] ticks.
     // Contracts per trade = floor(max_risk_per_trade / (stop ticks x tick value)).
@@ -146,6 +184,9 @@
     "roll_guard_days": 2,
     "leverage": 50,
     "notify_guard_changes": true,
+    // Live and dry-run: a stop is never placed at, through or within this many ticks of the
+    // market (it would fill on placement). Backtests ignore it. 0 turns it off.
+    "stop_min_distance_ticks": 4,
     // Experimental 1s-30s strategy timeframes.
     "seconds_mode": { "startup_candle_count": 300, "protection_minutes": 5 }
   },
@@ -157,6 +198,15 @@
     "cvd_divergence_lookback": 20
   },
 
+  // Trading costs per contract and per side, charged in backtest, hyperopt and dry-run. Live trading
+  // ignores this block: its fills carry the real fees. Defaults mirror the mock gateway (mock.js).
+  // The costs are set on each trade's fee_open/fee_close, so Freqtrade's "fee" setting is not needed.
+  "topstep_costs": {
+    "enabled": true,
+    "fee_per_contract": 0.37,
+    "commission_per_contract": 0.25,
+    "slippage_ticks": 1
+  },
   "telegram": {
     "enabled": false,
     "token": "",
@@ -174,6 +224,9 @@
     "reload": true,
     "balance_dust_level": 0.01
   },
+  // 0.0.0.0 is the address inside the container; compose publishes the port on 127.0.0.1 by default.
+  // jwt_secret_key, ws_token and password must be real secrets: the live bot refuses to start
+  // while one of them is empty or still contains "change-me".
   "api_server": {
     "enabled": true,
     "listen_ip_address": "0.0.0.0",

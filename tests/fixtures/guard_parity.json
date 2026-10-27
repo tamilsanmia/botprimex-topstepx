@@ -1,0 +1,1908 @@
+{
+ "_comment": [
+  "Shared by projectx-gateway/test/guard_parity.test.js (reference: src/guard.js) and tests/test_guard_parity.py (projectx/backtest_guard.py).",
+  "Each scenario runs its steps in order on ONE guard. defaults.topstep is merged (shallow) under scenario.topstep; account_name feeds the auto phase/preset.",
+  "step.closed lists the trades that closed since the previous step: the runner accumulates them, balance = start + all nets, dayRealized and the closed results",
+  "are the ones closed since the session start. step.unrealized is the open P&L at that moment. expect.codes are the reason codes in order;",
+  "expect.metrics is a subset compared to the cent. Expected values are worked out by hand from the Topstep rules, see each name.",
+  "Dates: Tue 20 Oct 2026 is a normal day (EDT, UTC-4); the clocks fall back on 1 Nov 2026 and spring forward on 14 Mar 2027."
+ ],
+ "defaults": {
+  "topstep": {
+   "phase": "evaluation",
+   "preset": "50k",
+   "start_balance": 50000,
+   "protection": {
+    "daily_profit_lock": {
+     "enabled": false
+    }
+   }
+  }
+ },
+ "scenarios": [
+  {
+   "name": "dll soft then hard lock with open P&L, clears next session",
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": -700,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "dll_soft"
+      ],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "dayPnl": -700,
+       "dayRealized": 0,
+       "unrealized": -700,
+       "equity": 49300,
+       "dayLossRemaining": 300,
+       "mllRoom": 1300
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:05:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:03:00-04:00",
+       "net": -900
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "day_locked",
+      "codes": [
+       "dll_hard",
+       "dll_soft"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "day_locked"
+      ],
+      "metrics": {
+       "balance": 49100,
+       "dayPnl": -900,
+       "dayLossRemaining": 100
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:10:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "day_locked",
+      "codes": [
+       "dll_hard",
+       "dll_soft"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "day_locked"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "dayPnl": 0,
+       "dayRealized": 0,
+       "balance": 49100,
+       "mllFloor": 48000,
+       "dayLossRemaining": 1000
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "daily_loss_type eod ignores open P&L",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "daily_loss_type": "eod"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": -950,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "dayPnl": 0,
+       "unrealized": -950,
+       "equity": 49050,
+       "dayLossRemaining": 1000,
+       "mllRoom": 1050
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:30:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:20:00-04:00",
+       "net": -950
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "day_locked",
+      "codes": [
+       "dll_hard",
+       "dll_soft"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "day_locked"
+      ],
+      "metrics": {
+       "dayPnl": -950,
+       "dayLossRemaining": 50
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "trailing_eod floor moves at eod_time, then the MLL buffer locks the account",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "daily_loss_limit": false,
+      "consistency_mode": "off"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T09:30:00-04:00",
+       "net": 1500
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "balance": 51500,
+       "highWater": 50000,
+       "mllFloor": 48000,
+       "mllRoom": 3500
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T16:11:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ],
+      "metrics": {
+       "highWater": 51500,
+       "mllFloor": 49500,
+       "mllRoom": 2000
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-21T09:45:00-04:00",
+       "net": -1750
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "account_locked",
+      "codes": [
+       "mll_buffer"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "account_locked"
+      ],
+      "metrics": {
+       "balance": 49750,
+       "mllFloor": 49500,
+       "mllRoom": 250,
+       "highWater": 51500
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T10:05:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "account_locked",
+      "codes": [
+       "mll_buffer"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "account_locked"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "trailing_intraday follows peak equity including open profit, and the lock sticks",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "max_loss_type": "trailing_intraday",
+      "daily_loss_limit": false,
+      "consistency_mode": "off"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 1500,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "equity": 51500,
+       "highWater": 51500,
+       "mllFloor": 49500,
+       "mllRoom": 2000
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:01:00-04:00",
+     "closed": [],
+     "unrealized": -300,
+     "entries_today": 0,
+     "expect": {
+      "status": "account_locked",
+      "codes": [
+       "mll_buffer"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "account_locked"
+      ],
+      "metrics": {
+       "equity": 49700,
+       "highWater": 51500,
+       "mllFloor": 49500,
+       "mllRoom": 200
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "account_locked",
+      "codes": [
+       "mll_buffer"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "account_locked"
+      ],
+      "metrics": {
+       "equity": 50000,
+       "highWater": 51500,
+       "mllFloor": 49500,
+       "mllRoom": 500
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "static floor never moves",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "max_loss_type": "static",
+      "daily_loss_limit": false,
+      "consistency_mode": "off"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T09:00:00-04:00",
+       "net": 1000
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "mllFloor": 48000,
+       "highWater": 50000,
+       "mllType": "static"
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T16:20:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ],
+      "metrics": {
+       "mllFloor": 48000,
+       "highWater": 50000,
+       "mllRoom": 3000
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "mllFloor": 48000,
+       "highWater": 50000
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "funded account: scaling plan follows the last EOD balance, MLL capped at the lock balance",
+   "account_name": "50KXFA-1",
+   "topstep": {
+    "phase": "auto",
+    "preset": "auto",
+    "start_balance": "auto"
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "startBalance": 0,
+       "maxMiniEquivalent": 2,
+       "mllFloor": -2000,
+       "dailyLossLimit": 1000
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T16:20:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:30:00-04:00",
+       "net": 1600
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ],
+      "metrics": {
+       "balance": 1600,
+       "highWater": 1600,
+       "mllFloor": -400,
+       "maxMiniEquivalent": 3
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "maxMiniEquivalent": 3
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T11:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-21T10:30:00-04:00",
+       "net": 500
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "balance": 2100,
+       "maxMiniEquivalent": 3
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T16:20:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ],
+      "metrics": {
+       "highWater": 2100,
+       "mllFloor": 0,
+       "mllRoom": 2100,
+       "maxMiniEquivalent": 5
+      }
+     }
+    },
+    {
+     "now": "2026-10-22T10:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-22T09:30:00-04:00",
+       "net": 900
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "balance": 3000,
+       "highWater": 2100,
+       "mllFloor": 0,
+       "maxMiniEquivalent": 5
+      }
+     }
+    },
+    {
+     "now": "2026-10-22T16:20:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ],
+      "metrics": {
+       "highWater": 3000,
+       "mllFloor": 0,
+       "mllRoom": 3000
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "profit giveback locks the day, counting open P&L",
+   "topstep": {
+    "protection": {
+     "daily_profit_lock": {
+      "enabled": true,
+      "activate_at": 800,
+      "giveback_pct": 40
+     }
+    },
+    "phases": {
+     "evaluation": {
+      "consistency_mode": "off"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 1000,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "dayPeakPnl": 1000,
+       "dayPnl": 1000
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:05:00-04:00",
+     "closed": [],
+     "unrealized": 590,
+     "entries_today": 0,
+     "expect": {
+      "status": "day_locked",
+      "codes": [
+       "profit_giveback"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "day_locked"
+      ],
+      "metrics": {
+       "dayPeakPnl": 1000,
+       "dayPnl": 590
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:10:00-04:00",
+     "closed": [],
+     "unrealized": 900,
+     "entries_today": 0,
+     "expect": {
+      "status": "day_locked",
+      "codes": [
+       "profit_giveback"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "day_locked"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "dayPeakPnl": 0,
+       "dayPnl": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "consistency cap_day caps the day, a pass needs the best day within 55% of profit",
+   "steps": [
+    {
+     "now": "2026-10-19T12:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-19T10:00:00-04:00",
+       "net": 2000
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "consistency_cap"
+      ],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "consistencyCap": 1650,
+       "effectiveTarget": 3636.36,
+       "totalProfit": 2000,
+       "bestDay": 2000,
+       "consistencyMode": "cap_day"
+      }
+     }
+    },
+    {
+     "now": "2026-10-19T16:20:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "consistency_cap",
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-20T11:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:30:00-04:00",
+       "net": 1100
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "bestDay": 2000,
+       "effectiveTarget": 3636.36,
+       "totalProfit": 3100,
+       "consistencyOk": false,
+       "targetProgressPct": 85.25
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T11:30:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T11:20:00-04:00",
+       "net": 540
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "account_locked",
+      "codes": [
+       "target_passed"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "account_locked"
+      ],
+      "metrics": {
+       "totalProfit": 3640,
+       "consistencyOk": true
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "consistency raise_target: no daily cap, the target rises to best day / pct",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "consistency_mode": "raise_target"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T11:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:00:00-04:00",
+       "net": 1700
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "consistencyCap": null,
+       "effectiveTarget": 3090.91,
+       "bestDay": 1700,
+       "consistencyMode": "raise_target"
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T12:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T11:50:00-04:00",
+       "net": 1350
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "totalProfit": 3050,
+       "effectiveTarget": 5545.45,
+       "targetProgressPct": 55
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "bestDay": 3050,
+       "effectiveTarget": 5545.45,
+       "totalProfit": 3050
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T11:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-21T10:30:00-04:00",
+       "net": 2500
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "account_locked",
+      "codes": [
+       "target_passed"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "account_locked"
+      ],
+      "metrics": {
+       "totalProfit": 5550,
+       "effectiveTarget": 5545.45
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "consistency off ignores the cap and the best-day condition",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "consistency_mode": "off"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T11:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:00:00-04:00",
+       "net": 2500
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "consistencyCap": null,
+       "effectiveTarget": 3000,
+       "consistencyOk": true,
+       "consistencyMode": "off"
+      }
+     }
+    },
+    {
+     "now": "2026-10-21T10:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-21T09:30:00-04:00",
+       "net": 600
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "account_locked",
+      "codes": [
+       "target_passed"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "account_locked"
+      ],
+      "metrics": {
+       "totalProfit": 3100,
+       "effectiveTarget": 3000,
+       "bestDay": 2500
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "stop_on_target false keeps trading past the target",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "consistency_mode": "off",
+      "stop_on_target": false
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T11:00:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:00:00-04:00",
+       "net": 3200
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "totalProfit": 3200,
+       "targetProgressPct": 106.67
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "trade and consecutive-loss counters",
+   "topstep": {
+    "phases": {
+     "evaluation": {
+      "daily_loss_limit": false,
+      "consistency_mode": "off"
+     }
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 9,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "entriesToday": 9
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:01:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 10,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "max_trades_per_day"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-20T10:30:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T09:00:00-04:00",
+       "net": -10
+      },
+      {
+       "at": "2026-10-20T09:10:00-04:00",
+       "net": -10
+      },
+      {
+       "at": "2026-10-20T09:20:00-04:00",
+       "net": -10
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 3,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "max_consecutive_losses"
+      ],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "consecutiveLosses": 3
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:40:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:35:00-04:00",
+       "net": 4
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 4,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "consecutiveLosses": 0
+      }
+     }
+    },
+    {
+     "now": "2026-10-20T10:50:00-04:00",
+     "closed": [
+      {
+       "at": "2026-10-20T10:45:00-04:00",
+       "net": -1
+      },
+      {
+       "at": "2026-10-20T10:46:00-04:00",
+       "net": -1
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 6,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "consecutiveLosses": 2
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "weekend blocks entries and flattens; trade_weekends lifts it",
+   "steps": [
+    {
+     "now": "2026-10-23T15:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-23T16:06:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "weekend"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "weekend"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-24T12:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "weekend"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "weekend"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-25T17:59:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "weekend"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "weekend"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-25T18:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "trade_weekends true trades on Saturday",
+   "topstep": {
+    "session": {
+     "trade_weekends": true
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-24T12:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "no-entry window and flat_by on a normal day",
+   "steps": [
+    {
+     "now": "2026-10-20T15:44:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-20T15:45:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-20T16:04:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-20T16:05:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-20T17:59:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-20T18:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-20T18:06:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "overnight hold mode blocks entries after flat_by but does not flatten",
+   "topstep": {
+    "session": {
+     "hold_mode": "overnight"
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T16:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "news blackout and trading windows",
+   "topstep": {
+    "session": {
+     "news_blackout": [
+      {
+       "days": "mon-fri",
+       "start": "08:28",
+       "end": "08:35",
+       "flatten": true
+      }
+     ],
+     "trading_windows": [
+      {
+       "start": "08:00",
+       "end": "11:30"
+      }
+     ]
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T07:59:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "outside_trading_windows"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-20T08:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "news_blackout"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "news_blackout"
+      ]
+     }
+    },
+    {
+     "now": "2026-10-20T09:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-10-20T11:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "outside_trading_windows"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "CME closed day (Good Friday) behaves like a weekend",
+   "steps": [
+    {
+     "now": "2026-04-02T12:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-04-02T19:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "holiday"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "holiday"
+      ]
+     }
+    },
+    {
+     "now": "2026-04-03T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "holiday"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "holiday"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "use_holiday_calendar false ignores Good Friday",
+   "topstep": {
+    "session": {
+     "use_holiday_calendar": false
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-04-03T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "early close (Memorial Day, EDT) brings no_entry_after and flat_by forward",
+   "steps": [
+    {
+     "now": "2026-05-24T18:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-05-25T12:24:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-05-25T12:25:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-05-25T12:39:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-05-25T12:40:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ]
+     }
+    },
+    {
+     "now": "2026-05-25T14:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ]
+     }
+    },
+    {
+     "now": "2026-05-25T18:06:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-05-26T12:30:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "early close in standard time (Thanksgiving, EST)",
+   "steps": [
+    {
+     "now": "2026-11-26T12:24:00-05:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-11-26T12:25:00-05:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    },
+    {
+     "now": "2026-11-26T12:40:00-05:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ]
+     }
+    },
+    {
+     "now": "2026-11-27T12:30:00-05:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "early close with overnight hold blocks entries only",
+   "topstep": {
+    "session": {
+     "hold_mode": "overnight"
+    }
+   },
+   "steps": [
+    {
+     "now": "2026-05-25T14:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": false,
+      "flattenReasons": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "2027 derived closed day (Good Friday 26 Mar 2027)",
+   "steps": [
+    {
+     "now": "2027-03-26T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "holiday"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "holiday"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "preset and phase resolved from a 100K combine account name",
+   "account_name": "100KTC-ABC-9",
+   "topstep": {
+    "phase": "auto",
+    "preset": "auto",
+    "start_balance": "auto"
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "startBalance": 100000,
+       "dailyLossLimit": 2000,
+       "profitTarget": 6000,
+       "mllFloor": 97000,
+       "maxMiniEquivalent": 10,
+       "mllType": "trailing_eod"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "preset and phase resolved from a 150K express funded account name",
+   "account_name": "150KXFA-5",
+   "topstep": {
+    "phase": "auto",
+    "preset": "auto",
+    "start_balance": "auto"
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "startBalance": 0,
+       "dailyLossLimit": 3000,
+       "profitTarget": null,
+       "mllFloor": -4500,
+       "maxMiniEquivalent": 3
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "live funded account: starts at its size and keeps a trailing floor",
+   "account_name": "50KLFA-2",
+   "topstep": {
+    "phase": "auto",
+    "preset": "auto",
+    "start_balance": "auto"
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "startBalance": 50000,
+       "mllFloor": 48000,
+       "mllRoom": 2000,
+       "maxMiniEquivalent": 2
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "numeric start_balance gives the size when there is no account name",
+   "topstep": {
+    "phase": "evaluation",
+    "preset": "auto",
+    "start_balance": 100000
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "startBalance": 100000,
+       "dailyLossLimit": 2000,
+       "mllFloor": 97000
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "explicit funded phase without an account name starts at zero",
+   "topstep": {
+    "phase": "funded",
+    "preset": "50k",
+    "start_balance": "auto"
+   },
+   "steps": [
+    {
+     "now": "2026-10-20T10:00:00-04:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "startBalance": 0,
+       "mllFloor": -2000,
+       "maxMiniEquivalent": 2
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "DST fall back: the Monday session starts at 18:00 EST on Sunday",
+   "steps": [
+    {
+     "now": "2026-11-02T10:00:00-05:00",
+     "closed": [
+      {
+       "at": "2026-11-01T17:30:00-05:00",
+       "net": -400
+      },
+      {
+       "at": "2026-11-01T18:30:00-05:00",
+       "net": -200
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "balance": 49400,
+       "dayRealized": -200,
+       "dayPnl": -200
+      }
+     }
+    },
+    {
+     "now": "2026-11-02T16:20:00-05:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "entries_blocked",
+      "codes": [
+       "no_entry_window"
+      ],
+      "flatten": true,
+      "flattenReasons": [
+       "session_flat_by"
+      ],
+      "metrics": {
+       "highWater": 50000,
+       "dayRealized": -200
+      }
+     }
+    },
+    {
+     "now": "2026-11-03T10:00:00-05:00",
+     "closed": [],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "dayRealized": 0,
+       "balance": 49400
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "DST spring forward: the Monday session starts at 18:00 EDT on Sunday",
+   "steps": [
+    {
+     "now": "2027-03-15T10:00:00-04:00",
+     "closed": [
+      {
+       "at": "2027-03-14T17:30:00-04:00",
+       "net": -400
+      },
+      {
+       "at": "2027-03-14T18:30:00-04:00",
+       "net": -200
+      }
+     ],
+     "unrealized": 0,
+     "entries_today": 0,
+     "expect": {
+      "status": "active",
+      "codes": [],
+      "flatten": false,
+      "flattenReasons": [],
+      "metrics": {
+       "balance": 49400,
+       "dayRealized": -200
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

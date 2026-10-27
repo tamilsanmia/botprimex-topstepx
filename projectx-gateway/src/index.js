@@ -3,7 +3,7 @@ import path from 'node:path';
 import { CandleStore } from './candles.js';
 import { loadConfig, pairOf, rootOf } from './config.js';
 import { ContractBook } from './contracts.js';
-import { GatewayError } from './errors.js';
+import { GatewayError, badRequest } from './errors.js';
 import { AccountGuard, summarizeFills } from './guard.js';
 import { ContinuousHistory } from './history.js';
 import { RateLimiter } from './limiter.js';
@@ -12,7 +12,7 @@ import { MarketStream } from './marketStream.js';
 import { createMockUpstream } from './mock.js';
 import { createNotifier } from './notifier.js';
 import { OrderflowService } from './orderflow.js';
-import { ProjectXClient } from './projectx.js';
+import { ProjectXClient, accountProduct } from './projectx.js';
 import { OrderRouter } from './router.js';
 import { RulesError, resolveRules } from './rules.js';
 import { createServer } from './server.js';
@@ -23,9 +23,125 @@ import { UserStream } from './userStream.js';
 
 const GUARD_THROTTLE_MS = 200;
 const HISTORY_DAYS = 90;
+const PROTECT_INTERVAL_MS = 2000;
+const STALE_NOTIFY_MIN_MS = 60_000;
+const STOP_MODES = ['gateway', 'native', 'off'];
+const SNAPSHOT_LIMITS = Object.freeze({ positions: 100, closedResults: 5000, pairLength: 40 });
+
+export class StartupError extends Error {}
+
+/** Settings the gateway must never run with. Throws StartupError. */
+export function assertStartable(cfg) {
+  if (!cfg.secret && !cfg.mock) {
+    throw new StartupError('GATEWAY_SECRET is empty. The gateway can place orders on a real account, so it refuses to start without a shared secret (generate one with: openssl rand -hex 32). Only PROJECTX_MOCK=1 may run without one.');
+  }
+  const ps = cfg.gateway?.protective_stop;
+  if (ps) {
+    const problems = [];
+    if (!STOP_MODES.includes(ps.mode)) problems.push(`protective_stop.mode must be one of ${STOP_MODES.join(', ')}, got ${JSON.stringify(ps.mode)}`);
+    if (!(Number(ps.grace_secs) >= 0)) problems.push('protective_stop.grace_secs must be >= 0');
+    if (!(Number(ps.flatten_after_secs) > Number(ps.grace_secs))) problems.push('protective_stop.flatten_after_secs must be greater than grace_secs');
+    if (problems.length) throw new StartupError(`Invalid projectx_gateway config: ${problems.join('; ')}`);
+  }
+  const stale = cfg.gateway?.stale;
+  if (stale) {
+    const block = Number(stale.block_entries_secs);
+    const flatten = Number(stale.flatten_secs);
+    const problems = [];
+    if (!(block > 0)) problems.push('stale.block_entries_secs must be greater than 0');
+    if (!(flatten === 0 || flatten >= block)) problems.push('stale.flatten_secs must be 0 (never flatten) or at least block_entries_secs');
+    if (problems.length) throw new StartupError(`Invalid projectx_gateway config: ${problems.join('; ')}`);
+  }
+  if (cfg.mock && cfg.dryRun === false) {
+    throw new StartupError('PROJECTX_MOCK=1 with dry_run=false: mock fills are synthetic, so Freqtrade would trade live on made-up prices. Set dry_run to true or unset PROJECTX_MOCK.');
+  }
+}
+
+/**
+ * Process-level error policy. A rejected promise nobody awaited is logged and
+ * announced but the gateway keeps running (it holds order state for open
+ * positions). An uncaught exception leaves unknown state, so the guard's state is
+ * flushed to disk and the process exits for Docker to restart it.
+ * Returns a function that removes the handlers.
+ */
+export function installProcessHandlers(app, { exit = (code) => process.exit(code), proc = process } = {}) {
+  const say = (text) => {
+    try {
+      Promise.resolve(app.notify?.(text)).catch(() => {});
+    } catch { /* notifying must never throw out of a handler */ }
+  };
+  const describe = (err) => (err instanceof Error ? (err.stack || err.message) : String(err));
+  const onRejection = (reason) => {
+    console.error('[gateway] unhandled rejection:', describe(reason));
+    say(`unhandled rejection (still running): ${reason instanceof Error ? reason.message : String(reason)}`);
+  };
+  const onException = (err) => {
+    console.error('[gateway] uncaught exception, exiting:', describe(err));
+    say(`uncaught exception, gateway is exiting: ${err instanceof Error ? err.message : String(err)}`);
+    try {
+      if (app.guard?.flush) app.guard.flush();
+      else app.guard?.persist();
+    } catch (flushErr) {
+      console.error('[gateway] guard flush failed:', flushErr.message);
+    }
+    exit(1);
+  };
+  proc.on('unhandledRejection', onRejection);
+  proc.on('uncaughtException', onException);
+  return () => {
+    proc.off('unhandledRejection', onRejection);
+    proc.off('uncaughtException', onException);
+  };
+}
+
+const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Checks the body of POST /guard/snapshot and returns a copy holding only the known
+ * fields. The snapshot feeds the account guard, so a malformed one must be rejected
+ * (400) rather than turned into NaN balances.
+ */
+export function validateSnapshot(body) {
+  const bad = (msg) => badRequest(`Invalid guard snapshot: ${msg}`);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('body must be a JSON object');
+
+  for (const key of ['realized_total', 'day_realized', 'entries_today']) {
+    if (!finite(body[key])) throw bad(`${key} must be a finite number`);
+  }
+  if (body.entries_today < 0 || !Number.isInteger(body.entries_today)) throw bad('entries_today must be a non-negative integer');
+
+  if (!Array.isArray(body.closed_results)) throw bad('closed_results must be an array of numbers');
+  if (body.closed_results.length > SNAPSHOT_LIMITS.closedResults) throw bad(`closed_results has more than ${SNAPSHOT_LIMITS.closedResults} entries`);
+  if (!body.closed_results.every(finite)) throw bad('closed_results must contain finite numbers only');
+
+  if (!Array.isArray(body.positions)) throw bad('positions must be an array');
+  if (body.positions.length > SNAPSHOT_LIMITS.positions) throw bad(`positions has more than ${SNAPSHOT_LIMITS.positions} entries`);
+  const positions = body.positions.map((p, i) => {
+    if (!p || typeof p !== 'object') throw bad(`positions[${i}] must be an object`);
+    if (typeof p.pair !== 'string' || !p.pair || p.pair.length > SNAPSHOT_LIMITS.pairLength) throw bad(`positions[${i}].pair must be a short string`);
+    if (p.side !== 'long' && p.side !== 'short') throw bad(`positions[${i}].side must be long or short`);
+    if (!finite(p.contracts) || p.contracts < 0) throw bad(`positions[${i}].contracts must be a non-negative number`);
+    if (!finite(p.entry_price) || p.entry_price <= 0) throw bad(`positions[${i}].entry_price must be a positive number`);
+    const out = { pair: p.pair, side: p.side, contracts: p.contracts, entry_price: p.entry_price };
+    if (p.mark !== undefined && p.mark !== null) {
+      if (!finite(p.mark) || p.mark <= 0) throw bad(`positions[${i}].mark must be a positive number`);
+      out.mark = p.mark;
+    }
+    return out;
+  });
+
+  return {
+    realized_total: body.realized_total,
+    day_realized: body.day_realized,
+    entries_today: body.entries_today,
+    closed_results: body.closed_results,
+    positions,
+  };
+}
 
 export class GatewayApp {
   constructor(cfg) {
+    assertStartable(cfg);
     this.cfg = cfg;
     this.stake = cfg.stakeCurrency;
     this.limiter = new RateLimiter(cfg.gateway.rate_limits);
@@ -112,7 +228,11 @@ export class GatewayApp {
     };
     this.market.on('quote', onBook);
     this.market.on('depth', onBook);
-    this.market.on('reconnected', (rs) => rs.forEach((r) => this.store.repair(r)));
+    // After a rebuilt or reconnected hub, ticks sent while it was down are lost: refetch the gap.
+    this.market.on('reconnected', (rs) => {
+      console.log(`[gateway] market hub reconnected, repairing candles for ${rs.join(', ')}`);
+      rs.forEach((r) => this.store.repair(r).catch((err) => console.warn(`[gateway] candle repair ${r} failed: ${err.message}`)));
+    });
 
     this.user = new UserStream({
       client: this.client,
@@ -121,9 +241,18 @@ export class GatewayApp {
       hubFactory: this.upstream.userHubFactory,
       accountSelector: cfg.gateway.account,
       reconcileSecs: cfg.gateway.reconcile_secs,
+      retention: cfg.gateway.user_retention,
     });
 
-    const server = createServer(this, { secret: cfg.secret, port: cfg.port });
+    const server = createServer(this, {
+      secret: cfg.secret,
+      port: cfg.port,
+      bind: cfg.bind,
+      bindSubnet: cfg.bindSubnet,
+      allowOpen: cfg.mock,
+      allowQuerySecret: cfg.allowQuerySecret,
+      dataOnly: cfg.dataOnly,
+    });
     this.server = server;
     this.store.on('candles', (root, tf, bars) => {
       server.broadcast(`ohlcv|${root}|${tf}`, { channel: 'ohlcv', symbol: pairOf(root, this.stake), timeframe: tf, data: bars });
@@ -132,7 +261,11 @@ export class GatewayApp {
 
     await this.market.start(roots);
 
-    if (this.guardSource === 'projectx') {
+    if (cfg.dataOnly) {
+      // Market data and history only: no account, no user hub, no guard.
+      this.user.accountError = 'This gateway runs in data-only mode (GATEWAY_DATA_ONLY=1): it has no trading account.';
+      console.warn('[gateway] DATA ONLY: order routes are disabled, no account is selected, the guard is off');
+    } else if (this.guardSource === 'projectx') {
       await this.retry('load account', () => this.user.start({ tradesSince: Date.now() - HISTORY_DAYS * 24 * 60 * 60 * 1000 }));
     } else {
       try {
@@ -152,14 +285,20 @@ export class GatewayApp {
       guard: this.guard ? () => this.guard : null,
       config: cfg.gateway,
       notify: this.notify,
+      dataOnly: cfg.dataOnly,
     });
-    this.setupGuard();
-    this.router_.guard = this.guard ? () => this.guard : null;
     this.user.on('orphan-cancelled', (o, reason) => this.notify(`cancelled orphan protective order ${o.id} (${reason})`));
-    for (const ev of ['trade', 'position', 'account']) this.user.on(ev, () => this.scheduleGuard());
+    if (!cfg.dataOnly) {
+      this.setupGuard();
+      // The guard has rebuilt its history from the fills loaded at start; older ones can go now.
+      if (this.guardSource === 'projectx') this.user.armPruning();
+      this.router_.guard = this.guard ? () => this.guard : null;
+      for (const ev of ['trade', 'position', 'account']) this.user.on(ev, () => this.scheduleGuard());
 
-    this.guardTimer = setInterval(() => this.evaluateGuard(), 1000);
-    this.guardTimer.unref?.();
+      this.guardTimer = setInterval(() => this.evaluateGuard(), 1000);
+      this.guardTimer.unref?.();
+      this.startProtectiveStop();
+    }
     this.rollTimer = setInterval(() => this.checkRolls().catch((err) => console.warn(`[gateway] roll check failed: ${err.message}`)), 10 * 60 * 1000);
     this.rollTimer.unref?.();
 
@@ -186,9 +325,18 @@ export class GatewayApp {
       console.warn('[gateway] topstep.enabled is false: account protection is OFF');
       return;
     }
+    if (cfg.dryRun && cfg.topstep.dry_run_enabled === false) {
+      console.warn('[gateway] dry-run with topstep.dry_run_enabled false: account protection is OFF (live keeps it)');
+      return;
+    }
     let resolved;
     try {
-      resolved = resolveRules(cfg.topstep, this.user.account);
+      // When the guard runs on Freqtrade's simulated account (dry-run), topstep.account_name says which account to
+      // simulate and wins over an auto-detected one. With the real account (live) it is ignored.
+      const named = this.guardSource === 'freqtrade' && cfg.topstep.account_name
+        ? { id: null, name: String(cfg.topstep.account_name), ...accountProduct(cfg.topstep.account_name) }
+        : null;
+      resolved = resolveRules(cfg.topstep, named || this.user.account);
     } catch (err) {
       if (err instanceof RulesError) {
         console.error(`[gateway] ${err.message}`);
@@ -203,6 +351,7 @@ export class GatewayApp {
       resolved,
       lots: new LotTable(resolved.lots),
       statePath: path.join(cfg.dataDir, `topstep_state.${stateName}.json`),
+      stale: cfg.gateway.stale,
     });
     if (this.guardSource === 'projectx') {
       this.guard.rebuildHistory([...this.user.trades.values()], this.user.account.balance);
@@ -214,6 +363,21 @@ export class GatewayApp {
     });
     console.log(`[gateway] rules: ${resolved.phase}, ${resolved.size ? `${resolved.size / 1000}K` : 'custom'}, start ${resolved.startBalance}, DLL ${resolved.rules.daily_loss_limit}, MLL ${resolved.rules.max_loss_limit} (${resolved.rules.max_loss_type}), target ${resolved.rules.profit_target}`);
     this.evaluateGuard();
+  }
+
+  /** Watchdog that gives every real position a stop (protective_stop.mode "gateway"). */
+  startProtectiveStop() {
+    const ps = this.router_.protectiveStop();
+    if (ps.mode !== 'gateway' || this.guardSource !== 'projectx') return;
+    if (!this.router_.maxRisk()) {
+      console.warn('[gateway] protective_stop is "gateway" but topstep.protection.max_risk_per_trade is off: the gateway cannot size a stop, so it will neither place stops nor refuse entries');
+      return;
+    }
+    console.log(`[gateway] protective stop: stop after ${ps.grace_secs}s without one, flatten after ${ps.flatten_after_secs}s`);
+    this.protectTimer = setInterval(() => {
+      this.router_.protectPositions().catch((err) => console.warn(`[gateway] protective stop check failed: ${err.message}`));
+    }, PROTECT_INTERVAL_MS);
+    this.protectTimer.unref?.();
   }
 
   scheduleGuard() {
@@ -234,12 +398,13 @@ export class GatewayApp {
         balance: this.user.account.balance,
         unrealized: this.router_.unrealized(),
         ...summarizeFills([...this.user.trades.values()], this.guard.clock.sessionStart(now)),
-        legs: this.router_.legs(),
+        legs: this.router_.legs({ reserved: false }),
+        dataHealth: this.dataHealth(now),
       };
     }
     const s = this.snapshot;
     if (!s) {
-      return { now, balance: this.guard.start, unrealized: 0, dayRealized: 0, closedResults: [], entriesToday: 0, legs: [] };
+      return { now, balance: this.guard.start, unrealized: 0, dayRealized: 0, closedResults: [], entriesToday: 0, legs: [], dataHealth: this.dataHealth(now) };
     }
     let unrealized = 0;
     const legs = [];
@@ -260,7 +425,49 @@ export class GatewayApp {
       closedResults: s.closed_results || [],
       entriesToday: Number(s.entries_today) || 0,
       legs,
+      dataHealth: this.dataHealth(now),
     };
+  }
+
+  /**
+   * What is wrong with the data the guard relies on, as { ok, reasons }. Each
+   * reason has a code (market_hub_down, user_hub_down, quote_stale,
+   * reconcile_stale), `since` (local ms when the data was last good) and ageSecs,
+   * and appears once it is block_entries_secs old. The guard turns reasons into
+   * blocked entries and, for open positions, a flatten (see AccountGuard.staleness).
+   */
+  dataHealth(now = Date.now()) {
+    const stale = this.cfg.gateway.stale;
+    const blockMs = Number(stale.block_entries_secs) * 1000;
+    const reasons = [];
+    const add = (code, since, extra = {}, minMs = blockMs) => {
+      if (!since || now - since < minMs) return;
+      reasons.push({ code, ...extra, since, ageSecs: Math.round((now - since) / 1000) });
+    };
+
+    if (this.market) {
+      if (this.market.hub.state !== 'connected') add('market_hub_down', this.market.hub.stateAt);
+      for (const root of this.market.wantedRoots()) add('quote_stale', this.market.quoteSince(root), { root });
+    }
+    if (this.user && this.guardSource === 'projectx' && !this.cfg.dataOnly) {
+      if (this.user.hub.state !== 'connected') add('user_hub_down', this.user.hub.stateAt);
+      // The REST reconcile runs every reconcile_secs; missing several in a row means REST is failing.
+      add('reconcile_stale', this.user.lastReconcileAt, {}, Math.max(blockMs, 3 * Number(this.cfg.gateway.reconcile_secs) * 1000));
+    }
+    return { ok: reasons.length === 0, reasons };
+  }
+
+  /** Tells the operator once when data goes stale and once when it recovers (at most one message a minute). */
+  noticeDataHealth(verdict, now = Date.now()) {
+    if (this.cfg.gateway.stale.notify === false) return;
+    const stale = verdict.reasons.some((r) => r.code === 'data_stale');
+    if (stale === Boolean(this.staleNotified) || now - (this.staleNotifyAt || 0) < STALE_NOTIFY_MIN_MS) return;
+    this.staleNotified = stale;
+    this.staleNotifyAt = now;
+    const detail = verdict.reasons.find((r) => r.code === 'data_stale')?.detail;
+    this.notify(stale
+      ? `market or account data is stale, entries are blocked${verdict.flattenReasons.includes('data_stale') ? ' and open positions are being flattened' : ''}: ${detail}`
+      : 'market and account data are fresh again, entries are allowed');
   }
 
   evaluateGuard() {
@@ -268,6 +475,7 @@ export class GatewayApp {
     const input = this.guardInputs();
     if (!input) return null;
     const verdict = this.guard.evaluate(input);
+    this.noticeDataHealth(verdict, input.now);
     if (this.guardSource === 'projectx') {
       this.router_.enforceFlatten(verdict).catch((err) => console.warn(`[gateway] flatten fallback failed: ${err.message}`));
     }
@@ -280,6 +488,11 @@ export class GatewayApp {
     for (const roll of this.contracts.rolls.slice(before)) {
       await this.market.roll(roll.root, roll.from, roll.to);
       this.notify(`${roll.root} front contract rolled ${roll.from} -> ${roll.to}`);
+      try {
+        await this.store.rebuild(roll.root);
+      } catch (err) {
+        console.warn(`[gateway] candle rebuild after ${roll.root} roll failed: ${err.message}`);
+      }
     }
   }
 
@@ -291,7 +504,17 @@ export class GatewayApp {
   /* ---------------------------------------------------------- API handlers -- */
 
   health() {
-    return { ok: true, ready: this.ready, mock: this.cfg.mock, marketHub: this.market?.hub.state ?? 'idle', startError: this.ready ? null : this.startError };
+    return {
+      ok: true,
+      ready: this.ready,
+      mock: this.cfg.mock,
+      marketHub: this.market?.hub.state ?? 'idle',
+      marketHubAgeMs: this.market?.hub.status().ageMs ?? null,
+      userHub: this.user?.hub.state ?? 'idle',
+      userHubAgeMs: this.user?.hub.status().ageMs ?? null,
+      dataHealth: this.ready ? this.dataHealth() : null,
+      startError: this.ready ? null : this.startError,
+    };
   }
 
   status() {
@@ -409,7 +632,7 @@ export class GatewayApp {
     if (this.guardSource !== 'freqtrade') {
       throw new GatewayError('Snapshots are only accepted when the guard runs on Freqtrade dry-run data', { status: 409, kind: 'BadRequest' });
     }
-    this.snapshot = body;
+    this.snapshot = validateSnapshot(body);
     return this.evaluateGuard() ?? this.guardState();
   }
 
@@ -422,9 +645,13 @@ export class GatewayApp {
   }
 
   async stop() {
+    if (this.stopped) return;
+    this.stopped = true;
     clearInterval(this.guardTimer);
+    clearInterval(this.protectTimer);
     clearInterval(this.rollTimer);
     await Promise.allSettled([this.market?.stop(), this.user?.stop()]);
+    this.guard?.flush();
     this.store?.close();
     this.ticks?.close();
     this.server?.server.close();
@@ -432,7 +659,17 @@ export class GatewayApp {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const app = new GatewayApp(loadConfig());
+  let app;
+  try {
+    app = new GatewayApp(loadConfig());
+  } catch (err) {
+    if (err instanceof StartupError) {
+      console.error(`[gateway] refusing to start: ${err.message}`);
+      process.exit(2);
+    }
+    throw err;
+  }
+  installProcessHandlers(app);
   const shutdown = async (signal) => {
     console.log(`[gateway] ${signal}, shutting down`);
     await app.stop();

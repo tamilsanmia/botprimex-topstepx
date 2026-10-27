@@ -28,11 +28,12 @@ const num = (v) => {
  *     volume-at-price profile (DomType 5) and session extremes. No ladder.
  */
 export class MarketStream extends EventEmitter {
-  constructor({ url, tokenFactory, contracts, hubFactory }) {
+  constructor({ url, tokenFactory, contracts, hubFactory, rebuildStepsMs }) {
     super();
     this.contracts = contracts;
     this.wanted = new Map();
     this.subscribed = new Set();
+    this.subscribedAt = new Map();
     this.quotes = new Map();
     this.profiles = new Map();
     this.hub = new ManagedHub({
@@ -40,6 +41,7 @@ export class MarketStream extends EventEmitter {
       url,
       tokenFactory,
       factory: hubFactory,
+      rebuildStepsMs,
       handlers: {
         GatewayQuote: (contractId, payload) => this.onQuote(contractId, payload),
         GatewayTrade: (contractId, payload) => this.onTrade(contractId, payload),
@@ -74,10 +76,12 @@ export class MarketStream extends EventEmitter {
       console.warn(`[market-hub] depth refused for ${contractId}: ${err.message}`);
     }
     this.subscribed.add(contractId);
+    this.subscribedAt.set(contractId, Date.now());
   }
 
   async resubscribeAll(hub, reconnected) {
     this.subscribed = new Set();
+    this.subscribedAt = new Map();
     for (const [contractId, root] of this.wanted) {
       // The gateway re-sends the profile snapshot on subscribe.
       this.profiles.get(contractId)?.clear();
@@ -113,6 +117,29 @@ export class MarketStream extends EventEmitter {
     return null;
   }
 
+  wantedRoots() {
+    return [...new Set(this.wanted.values())];
+  }
+
+  /**
+   * Local time of the newest quote, trade or depth message for the root, or of
+   * the latest (re)subscription if that is newer. Local receive time on purpose:
+   * server timestamps would turn clock skew into false staleness. Null when the
+   * root is not subscribed.
+   */
+  quoteSince(root) {
+    for (const [contractId, r] of this.wanted) {
+      if (r !== root) continue;
+      return Math.max(this.quotes.get(contractId)?.receivedAt || 0, this.subscribedAt.get(contractId) || 0) || null;
+    }
+    return null;
+  }
+
+  quoteAgeMs(root, now = Date.now()) {
+    const since = this.quoteSince(root);
+    return since === null ? null : Math.max(0, now - since);
+  }
+
   profileFor(root) {
     for (const [contractId, r] of this.wanted) {
       if (r === root) return this.profiles.get(contractId) || new Map();
@@ -125,7 +152,7 @@ export class MarketStream extends EventEmitter {
     if (!q) {
       q = {
         contractId, root: this.rootFor(contractId), last: null, bid: null, ask: null, bidSize: null, askSize: null,
-        open: null, high: null, low: null, volume: null, change: null, changePercent: null, ts: 0,
+        open: null, high: null, low: null, volume: null, change: null, changePercent: null, ts: 0, receivedAt: 0,
       };
       this.quotes.set(contractId, q);
     }
@@ -134,6 +161,7 @@ export class MarketStream extends EventEmitter {
 
   onQuote(contractId, payload) {
     const q = this.latchedQuote(contractId);
+    q.receivedAt = Date.now();
     for (const data of entries(payload)) {
       if (!data || typeof data !== 'object') continue;
       const last = num(data.lastPrice);
@@ -164,6 +192,7 @@ export class MarketStream extends EventEmitter {
     const root = this.rootFor(contractId);
     if (!root) return;
     const q = this.latchedQuote(contractId);
+    q.receivedAt = Date.now();
     for (const data of entries(payload)) {
       const price = num(data?.price);
       const size = num(data?.volume);
@@ -179,6 +208,7 @@ export class MarketStream extends EventEmitter {
   onDepth(contractId, payload) {
     const root = this.rootFor(contractId);
     const q = this.latchedQuote(contractId);
+    q.receivedAt = Date.now();
     let profile = this.profiles.get(contractId);
     if (!profile) {
       profile = new Map();

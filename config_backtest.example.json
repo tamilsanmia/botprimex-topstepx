@@ -1,8 +1,7 @@
 {
   // Backtesting config for TopstepX futures (FreqUI webserver + download-data).
   // Copy to user_data/config-futures-backtest.json. Credentials stay in .env.
-  "bot_name": "botprimex-topstepx-backtest",
-  "strategy": "BotPrimeX_TopstepX",
+  "bot_name": "topstepx-backtest",
   "max_open_trades": 4,
   "stake_currency": "USD",
   "stake_amount": "unlimited",
@@ -55,8 +54,11 @@
     "account": "auto",
     "live_data": false,
     // Lower than the live gateway's limits: both share your ProjectX rate limits.
-    "rate_limits": { "bars_per_30s": 30, "other_per_60s": 60 },
+    // No orders go through this gateway, so nothing needs to be reserved for them.
+    "rate_limits": { "bars_per_30s": 30, "other_per_60s": 60, "order_reserve": 0, "max_queue": 500 },
     "ticks": { "record": false },
+    // protective_stop, stale and user_retention (see config_projectx.example.json) only matter for a
+    // gateway that trades; this one is data-only (GATEWAY_DATA_ONLY=1), so their defaults are fine.
     // One continuous series per pair across contract rolls. "back" shifts older
     // contracts by the roll gap (no price jumps); "none" keeps raw prices.
     // ProjectX keeps hour/day bars ~1 year, minute bars ~60 days, second bars ~2 weeks.
@@ -67,15 +69,21 @@
   "topstep": {
     // false = no Topstep rules in backtests (loss limits, consistency, sessions, counters, contract cap).
     "enabled": true,
-    // Set these to the account you want to simulate.
+    // Set these to the account you want to simulate. "auto" for phase/preset is read from
+    // account_name (50KTC -> evaluation 50K, 100KXFA -> funded, 150KLFA -> live_funded) or, for
+    // the size, from a numeric start_balance. If neither resolves, the backtest stops with a
+    // configuration error instead of assuming a 50K evaluation.
     "phase": "evaluation",
     "preset": "50k",
     "start_balance": 50000,
+    // "account_name": "50KTC-BACKTEST",
     "timezone": "America/New_York",
     "session": {
       "reset_time": "18:00", "eod_time": "16:10",
       "no_entry_before": "18:05", "no_entry_after": "15:45", "flat_by": "16:05",
       "hold_mode": "intraday", "trading_windows": [], "trade_weekends": false,
+      // false ignores the CME holiday and early-close calendar (2026-2027).
+      "use_holiday_calendar": true,
       "news_blackout": [{ "days": "mon-fri", "start": "08:28", "end": "08:35", "label": "8:30 data" }]
     },
     "lots": { "micro_ratio": 10, "block_mini_micro_overlap": true, "overrides": {} },
@@ -84,8 +92,10 @@
         "profit_target": null, "daily_loss_limit": null, "max_loss_limit": null,
         "max_loss_type": "trailing_eod", "daily_loss_type": "intraday", "mll_lock_balance": null,
         // consistency_pct: Topstep requires the best day <= this % of total profit, so
-        // entries stop for the day at pct x profit_target ($1,500 on 50K). 0 = off.
-        "session": {}, "consistency_pct": 50, "max_mini_equivalent": null,
+        // entries stop for the day at pct x profit_target ($1,650 on 50K). 0 = off.
+        // consistency_mode: "cap_day" (default, cautious) as above; "raise_target" is Topstep's own rule
+        // (no daily cap, the profit target rises to best day / pct); "off" ignores consistency.
+        "session": {}, "consistency_pct": 55, "consistency_mode": "cap_day", "max_mini_equivalent": null,
         // false keeps trading after the target is passed, for strategy research.
         // true stops the backtest at the pass, like a real evaluation.
         "stop_on_target": false
@@ -115,10 +125,24 @@
     "roll_guard_days": 2,
     "leverage": 50,
     "notify_guard_changes": false,
+    // Live and dry-run only (stops never closer than this to the market); backtests ignore it.
+    "stop_min_distance_ticks": 4,
     "seconds_mode": { "startup_candle_count": 300, "protection_minutes": 5 }
   },
   "topstep_orderflow": { "enabled": false },
+  // Trading costs per contract and per side, charged in backtest, hyperopt and dry-run. Live trading
+  // ignores this block: its fills carry the real fees. Defaults mirror the mock gateway (mock.js).
+  // The costs are set on each trade's fee_open/fee_close, so Freqtrade's "fee" setting is not needed.
+  "topstep_costs": {
+    "enabled": true,
+    "fee_per_contract": 0.37,
+    "commission_per_contract": 0.25,
+    "slippage_ticks": 1
+  },
 
+  // 0.0.0.0 is the address inside the container; compose publishes the port on 127.0.0.1 by default.
+  // jwt_secret_key, ws_token and password must be real secrets: the backtest web app refuses to start
+  // while one of them is empty or still contains "change-me".
   "api_server": {
     "enabled": true,
     "listen_ip_address": "0.0.0.0",

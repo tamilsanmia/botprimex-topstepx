@@ -7,7 +7,9 @@
 #                     reach it, over the internal "backend" network.
 #   freqtrade         custom image with the "projectx" exchange registered.
 #
-# Credentials live in .env (see .env.example), never in config.json.
+# Credentials live in .env (see .env.example), never in config.json. The api_server
+# password, jwt_secret_key and ws_token in config.json must be real secrets: the bot
+# refuses to start with empty or "change-me" values.
 services:
   projectx-gateway:
     build:
@@ -21,11 +23,25 @@ services:
       GATEWAY_PORT: "8787"
     volumes:
       # Reads config.json (topstep + projectx_gateway blocks); writes guard state
-      # (topstep_state.*.json) and the tick recorder (ticks/).
+      # (topstep_state.*.json) and the tick recorder (ticks/). The whole directory
+      # stays writable on purpose: moving the state files would start the guard
+      # with fresh high-water marks and lose the Max Loss Limit history.
       - "./user_data:/freqtrade/user_data"
     networks:
       - backend
       - egress
+    read_only: true
+    tmpfs:
+      - /tmp  # the tick recorder unpacks old days here
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   freqtrade:
     build:
@@ -41,20 +57,41 @@ services:
       GATEWAY_SECRET: ${GATEWAY_SECRET:?set GATEWAY_SECRET in .env}
     volumes:
       - "./user_data:/freqtrade/user_data"
+      # Strategies live outside user_data, in ./strategies, mounted read-only where
+      # Freqtrade looks for them. The bot cannot change its own code.
+      - "./strategies:/freqtrade/user_data/strategies:ro"
     networks:
       - backend
       - egress
-    # FreqUI / API on localhost only. From your PC: ssh -L 8001:127.0.0.1:8001 <server>
+    # FreqUI / API on localhost by default. From your PC: ssh -L 8001:127.0.0.1:8001 <server>
+    # FREQTRADE_BIND=0.0.0.0 in .env publishes it on every interface: only do that together
+    # with scripts/ui-firewall.sh, which drops port 8001 except from FREQTRADE_UI_ALLOW.
     # See https://www.freqtrade.io/en/stable/rest-api/
     ports:
-      - "127.0.0.1:8001:8080"
+      - "${FREQTRADE_BIND:-127.0.0.1}:8001:8080"
+    # Writes only to user_data (mounted) and /tmp. Checked with `docker run` for
+    # trade (dry-run), backtesting and list-exchanges. Freqtrade falls back to
+    # `sudo chown` when it cannot create a directory under user_data; that is
+    # blocked here, so user_data must already be owned by uid 1000 (./topstep setup).
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Default command used when running `docker compose up`
     command: >
       trade
       --logfile /freqtrade/user_data/logs/freqtrade.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --db-url ${FREQTRADE_DB_URL:-sqlite:////freqtrade/user_data/tradesv3.sqlite}
       --config /freqtrade/user_data/config.json
-      --strategy ${STRATEGY:-BotPrimeX_TopstepX}
+      --strategy ${STRATEGY:?set STRATEGY in .env (a *_TopstepX class in strategies/)}
 
 networks:
   backend:

@@ -3,7 +3,9 @@ import { test } from 'node:test';
 
 import { parseLenientJson } from '../src/config.js';
 import { estimateExpiry } from '../src/contracts.js';
+import { AccountGuard } from '../src/guard.js';
 import { LotTable } from '../src/lots.js';
+import { createMockUpstream } from '../src/mock.js';
 import { accountProduct, contractMonth, contractRoot } from '../src/projectx.js';
 import { RulesError, maxMiniEquivalent, resolveRules } from '../src/rules.js';
 
@@ -42,8 +44,20 @@ test('account product auto-detection', () => {
   assert.deepEqual(accountProduct('50KTC-V2-658045-28155706'), { sizeUsd: 50000, kind: 'TC' });
   assert.deepEqual(accountProduct('150KXFA-1'), { sizeUsd: 150000, kind: 'XFA' });
   assert.deepEqual(accountProduct('PRACTICE'), { sizeUsd: null, kind: null });
-  assert.deepEqual(accountProduct('6KCHCR-LABS005-V2-684000-69917404'), { sizeUsd: null, kind: null });
+  assert.deepEqual(accountProduct('6KCHCR-LABS005-V2-684000-69917404'), { sizeUsd: 6000, kind: 'LABS' });
+  assert.deepEqual(accountProduct('6KCHCR-LABS005'), { sizeUsd: 6000, kind: 'LABS' });
+  assert.deepEqual(accountProduct('6KCHCRX-1'), { sizeUsd: null, kind: null });
   assert.deepEqual(accountProduct('50KTCX-1'), { sizeUsd: null, kind: null });
+});
+
+test('rules: a Topstep Labs account has no presets, so phase "auto" asks for explicit settings', () => {
+  const labs = { name: '6KCHCR-LABS005-V2-684000-69917404', ...accountProduct('6KCHCR-LABS005-V2-684000-69917404') };
+  assert.throws(() => resolveRules({ phase: 'auto' }, labs), (err) => err instanceof RulesError && /Topstep Labs/.test(err.message));
+  assert.throws(() => resolveRules({}, { name: 'PRACTICE', sizeUsd: null, kind: null }), (err) => /no recognised product code/.test(err.message));
+  const r = resolveRules({ phase: 'funded', phases: { funded: { daily_loss_limit: 300, max_loss_limit: 400, max_mini_equivalent: 1 } } }, labs);
+  assert.equal(r.size, 6000);
+  assert.equal(r.startBalance, 0);
+  assert.ok(r.warnings.some((w) => w.includes('no preset for a 6K account')), JSON.stringify(r.warnings));
 });
 
 test('rules: auto phase and preset from a 50K combine', () => {
@@ -67,6 +81,19 @@ test('rules: Express Funded starts at $0 and uses the scaling plan', () => {
   assert.equal(maxMiniEquivalent(r.rules, 99999), 10);
 });
 
+test('rules: an explicit funded phase without an account name still starts at $0', () => {
+  const funded = resolveRules({ phase: 'funded', preset: '50k' }, null);
+  assert.equal(funded.startBalance, 0);
+  assert.equal(funded.rules.mll_lock_balance, 0);
+  assert.equal(resolveRules({ phase: 'funded', preset: '50k', start_balance: 50000 }, null).startBalance, 50000, 'an explicit value wins');
+  assert.equal(resolveRules({ phase: 'evaluation', preset: '50k' }, null).startBalance, 50000);
+  const live = resolveRules({ phase: 'live_funded', preset: '50k' }, null);
+  assert.equal(live.startBalance, 50000);
+  assert.equal(live.rules.mll_lock_balance, null, 'a lock balance of 0 would sit below the whole floor of an account that starts at its size');
+  const bySize = resolveRules({ phase: 'evaluation', preset: 'auto', start_balance: 100000 }, null);
+  assert.equal(bySize.size, 100000);
+  assert.equal(bySize.rules.max_loss_limit, 3000);
+});
 test('rules: user values override presets, null keeps the preset, sessions merge per phase', () => {
   const r = resolveRules({
     phase: 'evaluation', preset: '150k',
@@ -107,4 +134,46 @@ test('rules: invalid config fails fast with every problem listed', () => {
 test('config parser accepts comments and trailing commas like Freqtrade', () => {
   const cfg = parseLenientJson('{\n // c\n "a": "http://x//y", /* b */ "b": [1, 2,],\n}');
   assert.deepEqual(cfg, { a: 'http://x//y', b: [1, 2] });
+});
+
+test('an unknown root is not guessed: weight 1, known false, and the old M-prefix rule is gone', () => {
+  const lots = new LotTable();
+  for (const root of ['MXYZ', 'FOO', 'MM', 'XX']) {
+    const info = lots.info(root);
+    assert.equal(info.known, false, root);
+    assert.equal(info.weight, 1, root);
+    assert.equal(info.class, 'mini', root);
+  }
+  assert.equal(lots.info('mes').known, true, 'lookups are case-insensitive');
+  assert.equal(lots.exposure([{ root: 'MXYZ', contracts: 3 }]), 3, 'an unknown micro-looking root counts as full minis');
+  assert.equal(lots.contractsThatFit('MXYZ', 5, []), 5);
+});
+
+test('an override makes an unknown root known; an empty override does not', () => {
+  const lots = new LotTable({ overrides: { MXYZ: { class: 'micro' }, WGT: { weight: 0.5 }, EMPTY: {} } });
+  assert.deepEqual([lots.info('MXYZ').known, lots.info('MXYZ').weight], [true, 0.1]);
+  assert.deepEqual([lots.info('WGT').known, lots.info('WGT').weight], [true, 0.5]);
+  assert.equal(lots.info('EMPTY').known, false);
+});
+
+test('every root the mock exchange offers is in the lot table', async () => {
+  const lots = new LotTable();
+  const contracts = await createMockUpstream({}).client.availableContracts();
+  assert.ok(contracts.length >= 14);
+  for (const c of contracts) assert.equal(lots.info(c.root).known, true, `${c.root} is missing from BUILTIN`);
+});
+
+test('AccountGuard.canEnter refuses an unknown root with a clear reason, and accepts it once overridden', () => {
+  const make = (overrides = {}) => {
+    const resolved = resolveRules({ phase: 'evaluation', preset: '50k', session: { trade_weekends: true, hold_mode: 'overnight', no_entry_before: '00:00', no_entry_after: '00:00', use_holiday_calendar: false } }, null);
+    const guard = new AccountGuard({ resolved, lots: new LotTable({ overrides }), statePath: null });
+    guard.evaluate({ balance: 50000, unrealized: 0, dayRealized: 0, closedResults: [], entriesToday: 0, legs: [] });
+    return guard;
+  };
+  const refused = make().canEnter({ root: 'MXYZ', contracts: 1, legs: [] });
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /unknown contract root MXYZ/);
+  assert.equal(refused.maxContracts, 0);
+  assert.equal(make().canEnter({ root: 'MES', contracts: 1, legs: [] }).ok, true);
+  assert.equal(make({ MXYZ: { class: 'micro' } }).canEnter({ root: 'MXYZ', contracts: 1, legs: [] }).ok, true);
 });

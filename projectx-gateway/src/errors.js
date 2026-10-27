@@ -37,4 +37,5 @@ export function placeErrorKind(errorCode) {
 
 export const invalidOrder = (message) => new GatewayError(message, { status: 400, kind: 'InvalidOrder' });
 export const badRequest = (message) => new GatewayError(message, { status: 400, kind: 'BadRequest' });
+export const permissionDenied = (message) => new GatewayError(message, { status: 403, kind: 'PermissionDenied' });
 export const notFound = (message, kind = 'OrderNotFound') => new GatewayError(message, { status: 404, kind });

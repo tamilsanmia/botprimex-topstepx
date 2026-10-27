@@ -1,0 +1,55 @@
+# Throwaway stack for tests/timeframe_matrix.sh: the gateway in mock mode plus a
+# dry-run Freqtrade. It shares nothing with the live or backtest stacks: its own
+# project name (pxmatrix), no fixed container names, its own networks and a scratch
+# user_data directory, and the API is published on loopback only.
+#
+#   MATRIX_WORK=/tmp/projectx-matrix STRATEGY=MyStrategy_TopstepX \
+#     docker compose -p pxmatrix -f tests/docker-compose.matrix.yml up -d --no-build
+#
+# Uses images that are already built; set MATRIX_TAG (default latest) to test a
+# :fixcheck build without touching the tag the live stack runs.
+name: pxmatrix
+services:
+  projectx-gateway:
+    image: botprimex/projectx-gateway:${MATRIX_TAG:-latest}
+    environment:
+      PROJECTX_MOCK: "1"
+      GATEWAY_SECRET: matrix-secret
+      FREQTRADE_CONFIG: /freqtrade/user_data/config.json
+      GATEWAY_PORT: "8787"
+    volumes:
+      - "${MATRIX_WORK:-/tmp/projectx-matrix}/user_data:/freqtrade/user_data"
+    networks:
+      - backend
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+  freqtrade:
+    image: botprimex/freqtrade-projectx:${MATRIX_TAG:-latest}
+    depends_on:
+      projectx-gateway:
+        condition: service_healthy
+    environment:
+      GATEWAY_SECRET: matrix-secret
+    volumes:
+      - "${MATRIX_WORK:-/tmp/projectx-matrix}/user_data:/freqtrade/user_data"
+    networks:
+      - backend
+      - frontend
+    ports:
+      - "127.0.0.1:${MATRIX_PORT:-18001}:8080"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --config /freqtrade/user_data/config.json
+      --strategy ${STRATEGY:?set STRATEGY}
+networks:
+  # The gateway is only reachable from Freqtrade; "frontend" exists so the API port
+  # can be published (an internal-only network cannot publish ports).
+  backend:
+    internal: true
+  frontend: {}

@@ -1,6 +1,12 @@
 .env
+.env.bak*
 user_data/
+# Your strategies (not part of this repo); the empty folder is kept.
+strategies/*
+!strategies/.gitkeep
 projectx-gateway/node_modules/
 __pycache__/
 *.pyc
 *.log
+# Workflow and agent notes
+.agents/

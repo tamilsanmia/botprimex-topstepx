@@ -7,6 +7,8 @@ import { ORDER_SIDE, ORDER_STATUS, POSITION_TYPE } from './projectx.js';
 const FINAL = new Set([ORDER_STATUS.FILLED, ORDER_STATUS.CANCELLED, ORDER_STATUS.EXPIRED, ORDER_STATUS.REJECTED]);
 const ORPHAN_SWEEP_MS = 5000;
 const CANCEL_STRIKES = 2;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RETENTION_DEFAULTS = Object.freeze({ orders_days: 2, trades_days: 14 });
 export const PROTECT_TAG = 'ft-sl-';
 
 /** User hub payloads may be the object itself or `{ action, data }`. */
@@ -26,8 +28,14 @@ function unwrap(args) {
  * empty read is indistinguishable from a bad response.
  */
 export class UserStream extends EventEmitter {
-  constructor({ client, url, tokenFactory, hubFactory, accountSelector = 'auto', reconcileSecs = 30 }) {
+  constructor({ client, url, tokenFactory, hubFactory, accountSelector = 'auto', reconcileSecs = 30, retention = {} }) {
     super();
+    const days = (value, fallback) => (Number(value) > 0 ? Number(value) : fallback);
+    this.retention = {
+      orders_days: days(retention.orders_days, RETENTION_DEFAULTS.orders_days),
+      trades_days: days(retention.trades_days, RETENTION_DEFAULTS.trades_days),
+    };
+    this.pruneArmed = false;
     this.client = client;
     this.accountSelector = accountSelector;
     this.reconcileSecs = reconcileSecs;
@@ -37,6 +45,8 @@ export class UserStream extends EventEmitter {
     this.orders = new Map();
     this.positions = new Map();
     this.trades = new Map();
+    // orderId -> Map(tradeId -> trade), kept in step with `trades` by addTrade/removeTrade.
+    this.tradesByOrder = new Map();
     this.waiters = new Map();
     this.strikes = new Map();
     this.lastReconcileAt = 0;
@@ -51,7 +61,7 @@ export class UserStream extends EventEmitter {
         GatewayUserPosition: (...a) => unwrap(a).forEach((x) => this.onPosition(x)),
         GatewayUserTrade: (...a) => unwrap(a).forEach((x) => this.onTrade(x)),
       },
-      onReady: (hub) => this.subscribe(hub),
+      onReady: (hub) => this.onHubReady(hub),
       onState: (state, info) => this.emit('state', state, info),
     });
   }
@@ -95,6 +105,20 @@ export class UserStream extends EventEmitter {
     return this.account?.id ?? null;
   }
 
+  /**
+   * Runs on every hub connect, including rebuilds and SignalR reconnects. Events
+   * sent while the socket was down are gone for good, so the REST state replaces
+   * whatever the hub missed. A failed reconcile must not fail the resubscribe.
+   */
+  async onHubReady(hub) {
+    await this.subscribe(hub);
+    try {
+      await this.reconcile();
+    } catch (err) {
+      console.warn(`[user-hub] reconcile after connect failed: ${err.message}`);
+    }
+  }
+
   async subscribe(hub) {
     const id = this.accountId;
     await hub.invoke('SubscribeAccounts');
@@ -110,7 +134,7 @@ export class UserStream extends EventEmitter {
       this.client.searchTrades(id, { start: since }),
     ]);
     for (const o of orders) this.orders.set(o.id, o);
-    for (const t of trades) this.trades.set(t.id, t);
+    for (const t of trades) this.addTrade(t);
   }
 
   async reconcile() {
@@ -136,7 +160,81 @@ export class UserStream extends EventEmitter {
       for (const o of recent) this.onOrder(o);
     }
     this.lastReconcileAt = Date.now();
+    if (this.pruneArmed) this.prune();
     this.emit('reconciled');
+  }
+
+  /**
+   * Allows prune() to run after every reconcile. Not armed at first: the guard
+   * rebuilds missed end-of-day history from the 90 days of fills loaded at start,
+   * and pruning them earlier would shorten that history.
+   */
+  armPruning() {
+    this.pruneArmed = true;
+    this.prune();
+  }
+
+  /**
+   * Drops finished orders older than retention.orders_days and fills older than
+   * retention.trades_days, so a gateway that runs for months does not grow without
+   * bound. Working orders are never dropped. Also clears bookkeeping that points at
+   * orders that are gone.
+   */
+  prune(now = Date.now()) {
+    const orderCutoff = now - this.retention.orders_days * DAY_MS;
+    const tradeCutoff = now - this.retention.trades_days * DAY_MS;
+    const dropped = { orders: 0, trades: 0 };
+
+    for (const [id, o] of this.orders) {
+      if (!FINAL.has(o.status)) continue;
+      const ts = Date.parse(o.updateTimestamp || o.creationTimestamp);
+      if (Number.isFinite(ts) && ts < orderCutoff) {
+        this.orders.delete(id);
+        dropped.orders += 1;
+      }
+    }
+    for (const [id, t] of this.trades) {
+      const ts = Date.parse(t.creationTimestamp);
+      if (Number.isFinite(ts) && ts < tradeCutoff) {
+        this.removeTrade(id);
+        dropped.trades += 1;
+      }
+    }
+    for (const id of this.strikes.keys()) {
+      const order = this.orders.get(id);
+      if (!order || FINAL.has(order.status)) this.strikes.delete(id);
+    }
+    for (const [id, list] of this.waiters) {
+      if (!list.length) this.waiters.delete(id);
+    }
+    return dropped;
+  }
+
+  addTrade(t) {
+    const previous = this.trades.get(t.id);
+    if (previous && previous.orderId !== t.orderId) this.unindexTrade(previous);
+    this.trades.set(t.id, t);
+    if (t.orderId === null || t.orderId === undefined) return;
+    let byId = this.tradesByOrder.get(t.orderId);
+    if (!byId) {
+      byId = new Map();
+      this.tradesByOrder.set(t.orderId, byId);
+    }
+    byId.set(t.id, t);
+  }
+
+  removeTrade(id) {
+    const t = this.trades.get(id);
+    if (!t) return;
+    this.trades.delete(id);
+    this.unindexTrade(t);
+  }
+
+  unindexTrade(t) {
+    const byId = this.tradesByOrder.get(t.orderId);
+    if (!byId) return;
+    byId.delete(t.id);
+    if (!byId.size) this.tradesByOrder.delete(t.orderId);
   }
 
   onAccount(a) {
@@ -168,7 +266,7 @@ export class UserStream extends EventEmitter {
 
   onTrade(t) {
     if (!t?.id || (this.accountId && t.accountId && t.accountId !== this.accountId)) return;
-    this.trades.set(t.id, t);
+    this.addTrade(t);
     this.emit('trade', t);
   }
 
@@ -194,7 +292,8 @@ export class UserStream extends EventEmitter {
   }
 
   tradesForOrder(orderId) {
-    return [...this.trades.values()].filter((t) => t.orderId === orderId && !t.voided);
+    const byId = this.tradesByOrder.get(orderId);
+    return byId ? [...byId.values()].filter((t) => !t.voided) : [];
   }
 
   openOrders() {
@@ -258,6 +357,7 @@ export class UserStream extends EventEmitter {
       positions: this.positions.size,
       openOrders: this.openOrders().length,
       lastReconcileAt: this.lastReconcileAt || null,
+      reconcileAgeMs: this.lastReconcileAt ? Date.now() - this.lastReconcileAt : null,
     };
   }
 

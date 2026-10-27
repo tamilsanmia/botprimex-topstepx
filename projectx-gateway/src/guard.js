@@ -2,6 +2,8 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+import { earlyCloseTimes, holidayFor } from './holidays.js';
+import { ORDER_SIDE } from './projectx.js';
 import { maxMiniEquivalent } from './rules.js';
 import { SessionClock, inWindow, parseDays, parseHHMM } from './session.js';
 
@@ -13,6 +15,9 @@ export const STATUS = Object.freeze({
 });
 
 const RANK = { active: 0, entries_blocked: 1, day_locked: 2, account_locked: 3 };
+
+const PERSIST_DEBOUNCE_MS = 1000;
+const STALE_DEFAULTS = Object.freeze({ block_entries_secs: 15, flatten_secs: 120 });
 
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : v);
 
@@ -39,25 +44,60 @@ export function fillNet(t) {
   return gross - (Number(t.fees) || 0) - (Number(t.commissions) || 0);
 }
 
-/** Today's realized P&L, closed results in order, and entries, from raw fills. */
+/**
+ * Today's realized P&L, closed results in order, and entries, from raw fills.
+ *
+ * A closed result is a round trip: the net of every fill of one contract from flat
+ * back to flat, so scaling in or out of a position is one result, like a closed
+ * Freqtrade trade. A fill that flips the position closes the old trip and opens a
+ * new one (its fees are split by size). Position state is tracked over all fills, so
+ * a trip opened before dayStart counts on the day it closes. A fill without a usable
+ * side or size cannot be tracked: it counts in dayRealized, and as its own result
+ * when it carries P&L.
+ */
 export function summarizeFills(trades, dayStart) {
-  const today = trades
-    .filter((t) => !t.voided && Date.parse(t.creationTimestamp) >= dayStart)
-    .sort((a, b) => Date.parse(a.creationTimestamp) - Date.parse(b.creationTimestamp));
+  const fills = trades
+    .filter((t) => !t.voided && Number.isFinite(Date.parse(t.creationTimestamp)))
+    .map((t) => ({ t, ts: Date.parse(t.creationTimestamp) }))
+    .sort((a, b) => a.ts - b.ts || (Number(a.t.id) || 0) - (Number(b.t.id) || 0));
 
   let dayRealized = 0;
-  const closes = new Map();
+  const closedResults = [];
   const entries = new Set();
-  for (const t of today) {
-    dayRealized += fillNet(t);
-    if (t.profitAndLoss === null || t.profitAndLoss === undefined) {
-      entries.add(t.orderId ?? t.id);
+  const trips = new Map(); // contractId -> { pos, net } for the round trip in progress
+  for (const { t, ts } of fills) {
+    const today = ts >= dayStart;
+    const net = fillNet(t);
+    const opening = t.profitAndLoss === null || t.profitAndLoss === undefined;
+    if (today) {
+      dayRealized += net;
+      if (opening) entries.add(t.orderId ?? t.id);
+    }
+
+    const size = Number(t.size);
+    const sign = t.side === ORDER_SIDE.BUY ? 1 : t.side === ORDER_SIDE.SELL ? -1 : 0;
+    if (!sign || !(size > 0)) {
+      if (today && !opening) closedResults.push(net);
+      continue;
+    }
+
+    const key = t.contractId ?? '';
+    const trip = trips.get(key) || { pos: 0, net: 0 };
+    const signed = sign * size;
+    const after = trip.pos + signed;
+    if (trip.pos !== 0 && Math.sign(after) !== Math.sign(trip.pos)) {
+      // Back to flat or through it: the part up to flat closes the trip.
+      const closeShare = Math.abs(trip.pos) / size;
+      const gross = opening ? 0 : Number(t.profitAndLoss) || 0;
+      const fees = (Number(t.fees) || 0) + (Number(t.commissions) || 0);
+      const result = trip.net + gross - fees * closeShare;
+      if (today) closedResults.push(result);
+      trips.set(key, after === 0 ? { pos: 0, net: 0 } : { pos: after, net: -fees * (1 - closeShare) });
     } else {
-      const key = t.orderId ?? t.id;
-      closes.set(key, (closes.get(key) || 0) + fillNet(t));
+      trips.set(key, { pos: after, net: trip.net + net });
     }
   }
-  return { dayRealized, closedResults: [...closes.values()], entriesToday: entries.size };
+  return { dayRealized, closedResults, entriesToday: entries.size };
 }
 
 /**
@@ -68,9 +108,13 @@ export function summarizeFills(trades, dayStart) {
  * the order router (entries refused) and the flatten fallback.
  */
 export class AccountGuard extends EventEmitter {
-  constructor({ resolved, lots, statePath, now = () => Date.now() }) {
+  constructor({ resolved, lots, statePath, now = () => Date.now(), stale = {}, persistDebounceMs = PERSIST_DEBOUNCE_MS }) {
     super();
     this.resolved = resolved;
+    this.stale = { ...STALE_DEFAULTS, ...stale };
+    this.persistDebounceMs = persistDebounceMs;
+    this.persistTimer = null;
+    this.persistPending = false;
     this.rules = resolved.rules;
     this.session = resolved.session;
     this.protection = resolved.protection;
@@ -108,12 +152,39 @@ export class AccountGuard extends EventEmitter {
     }
   }
 
+  /** Writes the state to disk now (atomic tmp + rename). Locks, day rollover and EOD snapshots use this. */
   persist() {
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
+    this.persistPending = false;
     if (!this.statePath) return;
     mkdirSync(path.dirname(this.statePath), { recursive: true });
     const tmp = `${this.statePath}.tmp`;
     writeFileSync(tmp, JSON.stringify(this.state, null, 2));
     renameSync(tmp, this.statePath);
+  }
+
+  /**
+   * Persists a change that can wait: a new day peak or intraday high-water mark
+   * moves on nearly every tick while a position is open, and writing the file each
+   * time blocks the event loop. The write happens at most persistDebounceMs later.
+   * Losing it in a crash costs at most that second of peak, never a lock.
+   */
+  persistLater() {
+    this.persistPending = true;
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      if (this.persistPending) this.persist();
+    }, this.persistDebounceMs);
+    this.persistTimer.unref?.();
+  }
+
+  /** Writes any debounced change now. Call on shutdown. */
+  flush() {
+    if (this.persistPending) this.persist();
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
   }
 
   /**
@@ -155,21 +226,87 @@ export class AccountGuard extends EventEmitter {
     return added;
   }
 
+  isWeekend(p) {
+    const t = this.times;
+    return p.weekday === 6
+      || (p.weekday === 5 && p.minutes >= t.flatBy)
+      || (p.weekday === 0 && p.minutes < t.reset);
+  }
+
+  /**
+   * True while the market is shut (weekend, or flat_by until the reset, which
+   * also covers the CME maintenance break), so no quotes are expected. This
+   * ignores hold_mode and trade_weekends on purpose: they decide what the bot may
+   * do, not whether the exchange is quoting.
+   */
+  sessionClosed(now) {
+    const p = this.clock.local(now);
+    if (this.isWeekend(p) || inWindow(p.minutes, this.times.flatBy, this.times.reset)) return true;
+    const h = this.holiday(now);
+    return Boolean(h && (h.closed || now >= h.times.closeTs));
+  }
+
+  /**
+   * The holiday row for the trading day containing `now` ({ row, closed, times, endTs }), or
+   * null when the calendar is off or the day is a normal one. `times` is set for an early
+   * close; endTs is the session reset that ends the day.
+   */
+  holiday(now) {
+    if (this.session.use_holiday_calendar === false) return null;
+    const day = this.clock.tradingDay(now);
+    const row = holidayFor(day.key);
+    if (!row) return null;
+    return { row, closed: row.type === 'closed', times: earlyCloseTimes(row), endTs: day.end };
+  }
+
+  /**
+   * Turns input.dataHealth reasons ({ code, root?, since }) into entry blocks and
+   * a flatten flag. A reason counts once it is block_entries_secs old and counts
+   * towards flatten at flatten_secs. Quote staleness is not counted while the
+   * market is shut, and never reaches back before the current session's reopen.
+   */
+  staleness(health, now, dayStart) {
+    const out = { block: [], flatten: false };
+    const blockMs = Number(this.stale.block_entries_secs) * 1000;
+    const flattenMs = Number(this.stale.flatten_secs) * 1000;
+    const closed = this.sessionClosed(now);
+    for (const r of health?.reasons || []) {
+      const quote = r.code === 'quote_stale';
+      if (quote && closed) continue;
+      const reported = Number(r.since);
+      const since = quote ? Math.max(Number.isFinite(reported) ? reported : 0, dayStart) : (Number.isFinite(reported) ? reported : 0);
+      const age = now - since;
+      if (age < blockMs) continue;
+      out.block.push(`${r.code}${r.root ? ` ${r.root}` : ''} ${Math.round(age / 1000)}s`);
+      if (flattenMs > 0 && age >= flattenMs) out.flatten = true;
+    }
+    return out;
+  }
+
   sessionFlags(now) {
     const p = this.clock.local(now);
     const t = this.times;
     const out = { blockEntries: [], flatten: [] };
 
-    const weekend = p.weekday === 6
-      || (p.weekday === 5 && p.minutes >= t.flatBy)
-      || (p.weekday === 0 && p.minutes < t.reset);
-    if (weekend && !this.session.trade_weekends) {
+    if (this.isWeekend(p) && !this.session.trade_weekends) {
       out.blockEntries.push('weekend');
       out.flatten.push('weekend');
       return out;
     }
 
+    // A holiday acts like a weekend. An early close adds a tighter no-entry and flat-by time; it never
+    // loosens the configured ones, which still apply below.
+    const holiday = this.holiday(now);
+    if (holiday?.closed) {
+      out.blockEntries.push('holiday');
+      out.flatten.push('holiday');
+      return out;
+    }
+
     if (inWindow(p.minutes, t.noEntryAfter, t.noEntryBefore)) out.blockEntries.push('no_entry_window');
+    if (holiday && now >= holiday.times.noEntryTs && now < holiday.endTs && !out.blockEntries.includes('no_entry_window')) {
+      out.blockEntries.push('no_entry_window');
+    }
     if (t.windows.length && !t.windows.some((w) => inWindow(p.minutes, w.start, w.end))) out.blockEntries.push('outside_trading_windows');
     for (const w of t.news) {
       if (w.days.has(p.weekday) && inWindow(p.minutes, w.start, w.end)) {
@@ -177,7 +314,10 @@ export class AccountGuard extends EventEmitter {
         if (w.flatten) out.flatten.push('news_blackout');
       }
     }
-    if (this.session.hold_mode === 'intraday' && inWindow(p.minutes, t.flatBy, t.reset)) out.flatten.push('session_flat_by');
+    if (this.session.hold_mode === 'intraday'
+      && (inWindow(p.minutes, t.flatBy, t.reset) || (holiday && now >= holiday.times.flatTs && now < holiday.endTs))) {
+      out.flatten.push('session_flat_by');
+    }
     return out;
   }
 
@@ -188,6 +328,7 @@ export class AccountGuard extends EventEmitter {
    * @param input.closedResults net result of each close today, in order
    * @param input.entriesToday  entry fills today
    * @param input.legs          [{ root, contracts }] open positions + working entries
+   * @param input.dataHealth    { reasons: [{ code, root?, since }] } stale or missing market/account data
    */
   evaluate(input) {
     const now = input.now ?? this.now();
@@ -199,7 +340,8 @@ export class AccountGuard extends EventEmitter {
     const unrealized = Number(input.unrealized) || 0;
     const dayRealized = Number(input.dayRealized) || 0;
     const equity = balance + unrealized;
-    let dirty = false;
+    let dirty = false; // changes that must reach disk before evaluate() returns
+    let minorDirty = false; // high-water marks, which may be written a moment later
 
     // A new trading day began. If the previous one was never snapshotted (the
     // gateway was not running at its EOD), close it from what is known now.
@@ -228,7 +370,7 @@ export class AccountGuard extends EventEmitter {
     const dayPnl = dayRealized + (r.daily_loss_type === 'intraday' ? unrealized : 0);
     if (dayPnl > s.dayPeakPnl) {
       s.dayPeakPnl = dayPnl;
-      dirty = true;
+      minorDirty = true;
     }
     const dayLoss = Math.max(0, -dayPnl);
     const totalProfit = balance - this.start;
@@ -239,7 +381,7 @@ export class AccountGuard extends EventEmitter {
       const next = Math.max(s.hwmIntraday ?? this.start, this.start, equity);
       if (next !== s.hwmIntraday) {
         s.hwmIntraday = next;
-        dirty = true;
+        minorDirty = true;
       }
       hwm = next;
     } else if (r.max_loss_type === 'trailing_eod') {
@@ -255,8 +397,14 @@ export class AccountGuard extends EventEmitter {
 
     const pastDays = Object.entries(s.days).filter(([k]) => k !== day.key).map(([, d]) => d.pnl);
     const bestDay = Math.max(dayRealized, ...pastDays, 0);
-    const consistencyCap = r.consistency_pct && r.profit_target ? (r.consistency_pct / 100) * r.profit_target : null;
-    const consistencyOk = !r.consistency_pct || totalProfit <= 0 || bestDay <= (r.consistency_pct / 100) * totalProfit;
+    // cap_day stops entries for the day at pct x target; raise_target has no cap and lifts the target to
+    // bestDay / pct instead (Topstep's rule); off ignores consistency. A pass needs totalProfit >= effectiveTarget
+    // in cap_day too, which is the same as the best day staying within pct of the total profit.
+    const mode = r.consistency_mode || 'cap_day';
+    const pct = mode !== 'off' && r.consistency_pct ? r.consistency_pct / 100 : null;
+    const consistencyCap = mode === 'cap_day' && pct && r.profit_target ? pct * r.profit_target : null;
+    const consistencyOk = !pct || totalProfit <= 0 || bestDay <= pct * totalProfit;
+    const effectiveTarget = r.profit_target ? Math.max(r.profit_target, pct ? bestDay / pct : 0) : null;
 
     const lastEod = s.lastEodKey ? s.days[s.lastEodKey]?.balanceEod : null;
     const scalingProfit = (Number.isFinite(lastEod) ? lastEod : balance) - this.start;
@@ -278,8 +426,11 @@ export class AccountGuard extends EventEmitter {
       this.lockAccount('mll_buffer', `equity ${round2(equity)} is ${round2(mllRoom)} above the MLL floor ${round2(floor)} (buffer ${p.mll_buffer})`, reasons);
       dirty = true;
     }
-    if (r.profit_target && r.stop_on_target && totalProfit >= r.profit_target && consistencyOk) {
-      this.lockAccount('target_passed', `profit ${round2(totalProfit)} reached target ${r.profit_target} with consistency met`, reasons);
+    if (r.profit_target && r.stop_on_target && totalProfit >= effectiveTarget) {
+      const detail = effectiveTarget > r.profit_target
+        ? `profit ${round2(totalProfit)} reached the raised target ${round2(effectiveTarget)} (best day ${round2(bestDay)})`
+        : `profit ${round2(totalProfit)} reached target ${r.profit_target} with consistency met`;
+      this.lockAccount('target_passed', detail, reasons);
       dirty = true;
     }
 
@@ -305,10 +456,14 @@ export class AccountGuard extends EventEmitter {
 
     const session = this.sessionFlags(now);
     for (const code of session.blockEntries) add(STATUS.ENTRIES_BLOCKED, code, null);
+    const stale = this.staleness(input.dataHealth, now, day.start);
+    if (stale.block.length) add(STATUS.ENTRIES_BLOCKED, 'data_stale', stale.block.join('; '));
 
     const status = reasons.reduce((acc, x) => (RANK[x.level] > RANK[acc] ? x.level : acc), STATUS.ACTIVE);
     const flattenReasons = [...session.flatten];
     if (status === STATUS.DAY_LOCKED || status === STATUS.ACCOUNT_LOCKED) flattenReasons.unshift(status);
+    // Flatten uses REST, which works without the hubs, so stale data with a position open closes it.
+    if (stale.flatten && legs.some((l) => Math.abs(Number(l.contracts)) > 0)) flattenReasons.push('data_stale');
 
     const winningDays = r.payout
       ? Object.values(s.days).filter((d) => d.pnl >= r.payout.min_winning_day_amount).length
@@ -322,6 +477,7 @@ export class AccountGuard extends EventEmitter {
       reasons,
       phase: this.resolved.phase,
       tradingDay: day.key,
+      holiday: this.holidayInfo(now),
       sessionStart: day.start,
       eodTs: day.eodTs,
       metrics: {
@@ -340,8 +496,10 @@ export class AccountGuard extends EventEmitter {
         mllRoom: round2(mllRoom),
         highWater: round2(hwm),
         profitTarget: r.profit_target ?? null,
-        targetProgressPct: r.profit_target ? round2((totalProfit / r.profit_target) * 100) : null,
+        effectiveTarget: round2(effectiveTarget),
+        targetProgressPct: effectiveTarget ? round2((totalProfit / effectiveTarget) * 100) : null,
         consistencyPct: r.consistency_pct ?? null,
+        consistencyMode: mode,
         consistencyCap: round2(consistencyCap),
         consistencyOk,
         bestDay: round2(bestDay),
@@ -358,6 +516,7 @@ export class AccountGuard extends EventEmitter {
     };
 
     if (dirty) this.persist();
+    else if (minorDirty) this.persistLater();
     this.last = result;
 
     const signature = `${status}|${reasons.map((x) => x.code).join(',')}|${flattenReasons.join(',')}`;
@@ -367,6 +526,12 @@ export class AccountGuard extends EventEmitter {
       this.emit('change', result, previous);
     }
     return result;
+  }
+
+  /** { date, name, type, closeEt } of today's holiday for status displays, or null. */
+  holidayInfo(now) {
+    const h = this.holiday(now);
+    return h ? { date: h.row.date, name: h.row.name, type: h.row.type, closeEt: h.row.closeEt } : null;
   }
 
   lockAccount(reason, detail, reasons) {
@@ -402,6 +567,9 @@ export class AccountGuard extends EventEmitter {
     if (!res) return { ok: false, reason: 'guard has not evaluated yet', maxContracts: 0 };
     if (!res.canEnter) {
       return { ok: false, reason: `${res.status}: ${res.reasons.map((x) => x.code).join(', ')}`, maxContracts: 0 };
+    }
+    if (!this.lots.info(root).known) {
+      return { ok: false, reason: `unknown contract root ${root}: its mini/micro weight is not in the lot table (add it under topstep.lots.overrides)`, maxContracts: 0 };
     }
     const held = [...new Set(legs.filter((l) => Math.abs(l.contracts) > 0).map((l) => l.root))];
     const conflict = this.lots.overlapConflict(root, held);

@@ -4,9 +4,12 @@ import { parseDays, parseHHMM } from './session.js';
  * Topstep presets per account size.
  *
  * Starting points only: Topstep revises these, and the gateway API exposes none
- * of them, so every value can be overridden in the `topstep` config block. The
- * evaluation figures match Topstep's published Trading Combine parameters; the
- * funded scaling tiers in particular must be checked against your dashboard.
+ * of them, so every value can be overridden in the `topstep` config block.
+ * docs/topstep-rules-sources.md lists each value with its source, the date it
+ * was checked and whether it could be verified. Verified: DLL, MLL, the 5/10/15
+ * mini caps and the 55% consistency target. Only secondary sources agree on the
+ * profit targets and the 50K scaling tiers; the 100K and 150K funded tiers are
+ * unverified, so check them against your dashboard.
  */
 export const PRESETS = Object.freeze({
   50000: {
@@ -50,7 +53,7 @@ export const PRESETS = Object.freeze({
 const FUNDED_DEFAULTS = {
   profit_target: null, daily_loss_limit: null, max_loss_limit: null,
   max_loss_type: 'trailing_eod', daily_loss_type: 'intraday', mll_lock_balance: 0,
-  consistency_pct: null, max_mini_equivalent: null, stop_on_target: false, scaling_plan: null,
+  consistency_pct: null, consistency_mode: 'cap_day', max_mini_equivalent: null, stop_on_target: false, scaling_plan: null,
   payout: { min_winning_days: 5, min_winning_day_amount: 150 },
 };
 
@@ -58,15 +61,30 @@ const PHASE_DEFAULTS = Object.freeze({
   evaluation: {
     profit_target: null, daily_loss_limit: null, max_loss_limit: null,
     max_loss_type: 'trailing_eod', daily_loss_type: 'intraday', mll_lock_balance: null,
-    consistency_pct: 50, max_mini_equivalent: null, stop_on_target: true, scaling_plan: null, payout: null,
+    consistency_pct: 55, consistency_mode: 'cap_day', max_mini_equivalent: null, stop_on_target: true, scaling_plan: null, payout: null,
   },
   funded: FUNDED_DEFAULTS,
-  live_funded: { ...FUNDED_DEFAULTS },
+  // A Live Funded Account starts at its size, not $0, so the XFA lock at a balance of 0 would sit far below
+  // the floor and switch the MLL off. Unlocked keeps the trailing floor (the cautious choice); see
+  // docs/topstep-rules-sources.md.
+  live_funded: { ...FUNDED_DEFAULTS, mll_lock_balance: null },
 });
+
+/**
+ * How the consistency target is applied (it needs consistency_pct and a profit_target):
+ *   cap_day       entries stop for the day once its P&L reaches pct x profit_target, so the
+ *                 best day never exceeds the target and the profit target never rises.
+ *   raise_target  Topstep's own rule: no cap, the profit target rises to bestDay / pct.
+ *   off           consistency is ignored.
+ */
+export const CONSISTENCY_MODES = Object.freeze(['cap_day', 'raise_target', 'off']);
 
 export const SESSION_DEFAULTS = Object.freeze({
   reset_time: '18:00', eod_time: '16:10', no_entry_before: '18:05', no_entry_after: '15:45',
   flat_by: '16:05', hold_mode: 'intraday', trading_windows: [], trade_weekends: false, news_blackout: [],
+  // CME holidays and early closes (src/holidays.js): closed days behave like a weekend, early
+  // closes bring the no-entry and flat-by times forward. false ignores the calendar.
+  use_holiday_calendar: true,
 });
 
 export const PROTECTION_DEFAULTS = Object.freeze({
@@ -76,8 +94,11 @@ export const PROTECTION_DEFAULTS = Object.freeze({
 });
 
 const KIND_PHASE = Object.freeze({ TC: 'evaluation', XFA: 'funded', PA: 'funded', LFA: 'live_funded' });
-/** An Express Funded Account builds its balance from $0; the others start at size. */
-const STARTS_AT_ZERO = new Set(['XFA']);
+/**
+ * Express Funded and Topstep Labs accounts build their balance from $0; the others start at size.
+ * The router adds the account size to these balances for Freqtrade's stake sizing.
+ */
+export const STARTS_AT_ZERO = new Set(['XFA', 'LABS']);
 
 const isAuto = (v) => v === undefined || v === null || v === 'auto';
 const defined = (obj) => Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v !== null && v !== undefined));
@@ -105,11 +126,18 @@ export function resolveRules(topstep = {}, account = null) {
   let phase = topstep.phase;
   if (isAuto(phase)) {
     phase = KIND_PHASE[account?.kind] || null;
-    if (!phase) problems.push(`topstep.phase is "auto" but the account name (${account?.name ?? 'none'}) has no recognised product code; set phase to evaluation, funded or live_funded`);
+    if (!phase && account?.kind === 'LABS') {
+      problems.push(`topstep.phase is "auto" but ${account.name ?? 'the account'} is a Topstep Labs account: there are no Labs rule presets, so set topstep.phase and the limits under topstep.phases yourself (or set topstep.enabled to false)`);
+    } else if (!phase) {
+      problems.push(`topstep.phase is "auto" but the account name (${account?.name ?? 'none'}) has no recognised product code; set phase to evaluation, funded or live_funded`);
+    }
   }
   if (phase && !PHASE_DEFAULTS[phase]) problems.push(`topstep.phase must be evaluation, funded or live_funded, got "${phase}"`);
 
-  let size = isAuto(topstep.preset) ? account?.sizeUsd ?? null : sizeFromPreset(topstep.preset);
+  // With no account name the size can still come from a numeric start_balance (an Express Funded Account
+  // starts at 0, so only a positive value counts).
+  const sizeFromBalance = Number(topstep.start_balance) > 0 && !isAuto(topstep.start_balance) ? Number(topstep.start_balance) : null;
+  let size = isAuto(topstep.preset) ? account?.sizeUsd ?? sizeFromBalance : sizeFromPreset(topstep.preset);
   if (!isAuto(topstep.preset) && !size) problems.push(`topstep.preset must be "auto", "50k", "100k" or "150k", got "${topstep.preset}"`);
   if (size && !PRESETS[size]) {
     warnings.push(`no preset for a ${size / 1000}K account; every limit must be set explicitly`);
@@ -118,6 +146,9 @@ export function resolveRules(topstep = {}, account = null) {
   let startBalance = topstep.start_balance;
   if (isAuto(startBalance)) {
     if (account?.kind && STARTS_AT_ZERO.has(account.kind)) startBalance = 0;
+    // Without an account name only the phase tells: an Express Funded Account builds its balance from $0, and
+    // sizing it at the account size would put the lock balance (0) above every floor and switch the MLL off.
+    else if (!account?.kind && phase === 'funded') startBalance = 0;
     else startBalance = size;
   }
   startBalance = Number(startBalance);
@@ -185,7 +216,10 @@ function validate({ rules, session, protection, lots, timezone, problems }) {
   if (rules.mll_lock_balance !== null && rules.mll_lock_balance !== undefined && !Number.isFinite(Number(rules.mll_lock_balance))) {
     problems.push(`mll_lock_balance must be a number or null, got ${rules.mll_lock_balance}`);
   }
-  if (rules.consistency_pct && !rules.profit_target) {
+  if (!CONSISTENCY_MODES.includes(rules.consistency_mode)) {
+    problems.push(`consistency_mode must be ${CONSISTENCY_MODES.join(', ')}, got "${rules.consistency_mode}"`);
+  }
+  if (rules.consistency_pct && rules.consistency_mode !== 'off' && !rules.profit_target) {
     problems.push('consistency_pct needs a profit_target to size the daily cap');
   }
   if (Array.isArray(rules.scaling_plan)) {
@@ -212,6 +246,9 @@ function validate({ rules, session, protection, lots, timezone, problems }) {
     } catch (err) {
       problems.push(err.message);
     }
+  }
+  if (typeof session.use_holiday_calendar !== 'boolean') {
+    problems.push(`session.use_holiday_calendar must be true or false, got ${JSON.stringify(session.use_holiday_calendar)}`);
   }
   if (!['intraday', 'overnight'].includes(session.hold_mode)) {
     problems.push(`session.hold_mode must be intraday or overnight, got "${session.hold_mode}"`);
